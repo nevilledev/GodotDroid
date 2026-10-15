@@ -1,5 +1,6 @@
 package com.godotdroid.ui.screens
 
+import android.content.Context
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -22,15 +23,17 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RocketLaunch
 import androidx.compose.material.icons.filled.SportsEsports
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -49,11 +52,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.godotdroid.pck.model.RendererType
+import com.godotdroid.ui.components.CoreManagerSheet
 import com.godotdroid.ui.components.GameCard
 import com.godotdroid.ui.components.GameInspectorSheet
 import com.godotdroid.ui.theme.AccentCyan
@@ -65,6 +70,7 @@ import com.godotdroid.ui.theme.SurfaceVariantDark
 import com.godotdroid.ui.theme.TextPrimaryDark
 import com.godotdroid.ui.theme.TextSecondaryDark
 import com.godotdroid.ui.theme.TextTertiaryDark
+import com.godotdroid.ui.theme.WarningAmber
 import com.godotdroid.ui.viewmodel.GameLibraryViewModel
 import com.godotdroid.ui.viewmodel.UiEvent
 
@@ -74,17 +80,25 @@ fun GameLibraryScreen(
     viewModel: GameLibraryViewModel,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val games by viewModel.games.collectAsState()
     val isImporting by viewModel.isImporting.collectAsState()
     val selectedGame by viewModel.selectedGame.collectAsState()
 
+    val installedCores by viewModel.installedCores.collectAsState()
+    val isDownloadingCore by viewModel.isDownloadingCore.collectAsState()
+    val downloadProgress by viewModel.downloadProgress.collectAsState()
+    val registryCores = viewModel.registryCores
+
     val snackbarHostState = remember { SnackbarHostState() }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val coreSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    var launchDialogData by remember { mutableStateOf<Pair<String, RendererType>?>(null) }
+    var showCoreManagerSheet by remember { mutableStateOf(false) }
+    var promptInstallData by remember { mutableStateOf<Pair<String, String>?>(null) }
     var exportDialogGameTitle by remember { mutableStateOf<String?>(null) }
 
-    // SAF File Picker
+    // SAF File Picker for Games (.exe, .pck)
     val openDocumentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -95,8 +109,10 @@ fun GameLibraryScreen(
         viewModel.uiEvents.collect { event ->
             when (event) {
                 is UiEvent.ShowMessage -> snackbarHostState.showSnackbar(event.message)
-                is UiEvent.ShowLaunchDialog -> launchDialogData = event.gameTitle to event.renderer
+                is UiEvent.ShowLaunchDialog -> {}
                 is UiEvent.ShowExportDialog -> exportDialogGameTitle = event.gameTitle
+                is UiEvent.PromptCoreInstall -> promptInstallData = event.versionKey to event.gameTitle
+                is UiEvent.LaunchGame -> context.startActivity(event.intent)
             }
         }
     }
@@ -129,12 +145,21 @@ fun GameLibraryScreen(
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "PC Godot Android Runtime & Exporter",
+                                text = "PC Godot Android Runtime",
                                 color = AccentCyan,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Medium
                             )
                         }
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { showCoreManagerSheet = true }) {
+                        Icon(
+                            imageVector = Icons.Default.Extension,
+                            contentDescription = "Core Manager",
+                            tint = if (installedCores.isNotEmpty()) AccentCyan else TextSecondaryDark
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = SurfaceDark)
@@ -143,7 +168,6 @@ fun GameLibraryScreen(
         floatingActionButton = {
             FloatingActionButton(
                 onClick = {
-                    // Filter for all files / octet-stream / executables
                     openDocumentLauncher.launch(arrayOf("*/*"))
                 },
                 containerColor = GodotBlue,
@@ -246,29 +270,59 @@ fun GameLibraryScreen(
                         viewModel.updateRendererOverride(game, renderer)
                     },
                     onExtractPck = { viewModel.extractStandalonePck(game) },
-                    onLaunchGame = { viewModel.onLaunchGameClicked(game) },
+                    onLaunchGame = { viewModel.launchGame(context, game) },
                     onExportApk = { viewModel.onExportApkClicked(game) },
                     onDeleteGame = { viewModel.deleteGame(game) }
                 )
             }
 
-            // Launch Game Preview Dialog (Phase 2 Entry Point)
-            launchDialogData?.let { (title, renderer) ->
+            // Core Manager Sheet
+            if (showCoreManagerSheet) {
+                CoreManagerSheet(
+                    installedCores = installedCores,
+                    registryCores = registryCores,
+                    downloadProgress = downloadProgress,
+                    isDownloading = isDownloadingCore,
+                    sheetState = coreSheetState,
+                    onDismiss = { showCoreManagerSheet = false },
+                    onImportTemplate = { uri, versionKey ->
+                        viewModel.importCoreFromTemplate(uri, versionKey)
+                    },
+                    onDownloadCore = { descriptor ->
+                        viewModel.downloadCore(descriptor)
+                    },
+                    onDeleteCore = { versionKey ->
+                        viewModel.deleteCore(versionKey)
+                    }
+                )
+            }
+
+            // Prompt Core Install Dialog
+            promptInstallData?.let { (versionKey, title) ->
                 AlertDialog(
-                    onDismissRequest = { launchDialogData = null },
-                    icon = { Icon(Icons.Default.PlayArrow, contentDescription = null, tint = GodotBlue) },
-                    title = { Text("Launch Game (Phase 2)") },
+                    onDismissRequest = { promptInstallData = null },
+                    icon = { Icon(Icons.Default.Warning, contentDescription = null, tint = WarningAmber) },
+                    title = { Text("Godot $versionKey Core Required") },
                     text = {
                         Text(
-                            "Game: $title\nSelected Renderer: ${renderer.displayName}\n\n" +
-                                    "Phase 1 inspection and scaffolding complete! In Phase 2, the isolated :godot_runner process host will load libgodot_android.so and boot the game with automatic touch controls overlay.",
+                            "Game \"$title\" was built with Godot $versionKey bytecode.\n\n" +
+                                    "To launch this game, GodotDroid needs the matching Godot $versionKey ARM64 engine core. " +
+                                    "You can download it from our official registry or import your official export template.",
                             fontSize = 13.sp,
                             lineHeight = 18.sp
                         )
                     },
                     confirmButton = {
-                        TextButton(onClick = { launchDialogData = null }) {
-                            Text("OK", color = GodotBlue)
+                        TextButton(onClick = {
+                            promptInstallData = null
+                            showCoreManagerSheet = true
+                        }) {
+                            Text("Open Core Manager", color = GodotBlue, fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { promptInstallData = null }) {
+                            Text("Cancel", color = TextSecondaryDark)
                         }
                     },
                     containerColor = SurfaceDark,

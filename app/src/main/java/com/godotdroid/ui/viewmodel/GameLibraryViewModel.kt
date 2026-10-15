@@ -1,6 +1,8 @@
 package com.godotdroid.ui.viewmodel
 
 import android.app.Application
+import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -8,6 +10,11 @@ import com.godotdroid.data.GameLibraryRepository
 import com.godotdroid.data.SavedGameItem
 import com.godotdroid.pck.inspector.PckBinaryInspector
 import com.godotdroid.pck.model.RendererType
+import com.godotdroid.runtime.activity.GodotRunnerActivity
+import com.godotdroid.runtime.core.CoreDescriptor
+import com.godotdroid.runtime.core.CoreManager
+import com.godotdroid.runtime.core.DownloadProgress
+import com.godotdroid.runtime.core.InstalledCore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,12 +30,15 @@ sealed class UiEvent {
     data class ShowMessage(val message: String) : UiEvent()
     data class ShowLaunchDialog(val gameTitle: String, val renderer: RendererType) : UiEvent()
     data class ShowExportDialog(val gameTitle: String) : UiEvent()
+    data class PromptCoreInstall(val versionKey: String, val gameTitle: String) : UiEvent()
+    data class LaunchGame(val intent: Intent) : UiEvent()
 }
 
 class GameLibraryViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = GameLibraryRepository(application.applicationContext)
     private val inspector = PckBinaryInspector()
+    private val coreManager = CoreManager(application.applicationContext)
 
     private val _games = MutableStateFlow<List<SavedGameItem>>(emptyList())
     val games: StateFlow<List<SavedGameItem>> = _games.asStateFlow()
@@ -42,11 +52,24 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
     private val _selectedGame = MutableStateFlow<SavedGameItem?>(null)
     val selectedGame: StateFlow<SavedGameItem?> = _selectedGame.asStateFlow()
 
+    // Core Management States
+    private val _installedCores = MutableStateFlow<List<InstalledCore>>(emptyList())
+    val installedCores: StateFlow<List<InstalledCore>> = _installedCores.asStateFlow()
+
+    private val _isDownloadingCore = MutableStateFlow(false)
+    val isDownloadingCore: StateFlow<Boolean> = _isDownloadingCore.asStateFlow()
+
+    private val _downloadProgress = MutableStateFlow<DownloadProgress?>(null)
+    val downloadProgress: StateFlow<DownloadProgress?> = _downloadProgress.asStateFlow()
+
+    val registryCores: List<CoreDescriptor> get() = coreManager.builtInRegistry
+
     private val _uiEvents = MutableSharedFlow<UiEvent>()
     val uiEvents: SharedFlow<UiEvent> = _uiEvents.asSharedFlow()
 
     init {
         loadGames()
+        refreshCores()
     }
 
     fun loadGames() {
@@ -54,6 +77,12 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
             _isLoading.value = true
             _games.value = repository.getGames()
             _isLoading.value = false
+        }
+    }
+
+    fun refreshCores() {
+        viewModelScope.launch {
+            _installedCores.value = coreManager.getInstalledCores()
         }
     }
 
@@ -102,7 +131,7 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch {
             try {
                 val sourceFile = File(game.filePath)
-                val targetFile = File(sourceFile.parentFile, "${sourceFile.nameWithoutExtension}_extracted.pck")
+                val targetFile = File(sourceFile.parentFile, "${sourceFile.nameWithoutExtension}_standalone.pck")
 
                 val transferred = withContext(Dispatchers.IO) {
                     inspector.extractStandalonePck(sourceFile, targetFile, game.report.pckHeader)
@@ -117,6 +146,34 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    fun launchGame(context: Context, game: SavedGameItem) {
+        viewModelScope.launch {
+            val major = game.report.pckHeader.engineMajor
+            val minor = game.report.pckHeader.engineMinor
+            val versionKey = "$major.$minor"
+
+            val matchingCore = coreManager.getCore(versionKey)
+                ?: coreManager.findMatchingCore(major, minor)
+
+            if (matchingCore == null) {
+                _uiEvents.emit(UiEvent.PromptCoreInstall(versionKey, game.report.gameTitle))
+                return@launch
+            }
+
+            val intent = GodotRunnerActivity.createIntent(
+                context = context,
+                gameId = game.id,
+                gameTitle = game.report.gameTitle,
+                filePath = game.filePath,
+                renderer = game.selectedRenderer,
+                versionKey = matchingCore.versionKey,
+                mainSceneOverride = game.report.mainScene
+            )
+
+            _uiEvents.emit(UiEvent.LaunchGame(intent))
+        }
+    }
+
     fun onLaunchGameClicked(game: SavedGameItem) {
         viewModelScope.launch {
             _uiEvents.emit(UiEvent.ShowLaunchDialog(game.report.gameTitle, game.selectedRenderer))
@@ -126,6 +183,73 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
     fun onExportApkClicked(game: SavedGameItem) {
         viewModelScope.launch {
             _uiEvents.emit(UiEvent.ShowExportDialog(game.report.gameTitle))
+        }
+    }
+
+    // Core Management Operations
+    fun importCoreFromTemplate(uri: Uri, versionKey: String) {
+        viewModelScope.launch {
+            _isDownloadingCore.value = true
+            try {
+                val context = getApplication<Application>().applicationContext
+                val input = context.contentResolver.openInputStream(uri)
+                if (input == null) {
+                    _uiEvents.emit(UiEvent.ShowMessage("Could not open template file"))
+                    _isDownloadingCore.value = false
+                    return@launch
+                }
+
+                val result = coreManager.importCoreFromTemplate(
+                    inputStream = input,
+                    versionKey = versionKey,
+                    onProgress = { progress -> _downloadProgress.value = progress }
+                )
+
+                _isDownloadingCore.value = false
+                _downloadProgress.value = null
+
+                result.onSuccess { core ->
+                    refreshCores()
+                    _uiEvents.emit(UiEvent.ShowMessage("Successfully imported Godot ${core.versionKey} core!"))
+                }.onFailure { error ->
+                    _uiEvents.emit(UiEvent.ShowMessage("Failed to import core: ${error.message}"))
+                }
+            } catch (e: Exception) {
+                _isDownloadingCore.value = false
+                _downloadProgress.value = null
+                _uiEvents.emit(UiEvent.ShowMessage("Error importing template: ${e.message}"))
+            }
+        }
+    }
+
+    fun downloadCore(descriptor: CoreDescriptor) {
+        viewModelScope.launch {
+            _isDownloadingCore.value = true
+            val result = coreManager.downloadCore(
+                descriptor = descriptor,
+                onProgress = { progress -> _downloadProgress.value = progress }
+            )
+            _isDownloadingCore.value = false
+            _downloadProgress.value = null
+
+            result.onSuccess { core ->
+                refreshCores()
+                _uiEvents.emit(UiEvent.ShowMessage("Installed ${descriptor.displayName}!"))
+            }.onFailure { error ->
+                _uiEvents.emit(UiEvent.ShowMessage("Failed to download core: ${error.message}"))
+            }
+        }
+    }
+
+    fun deleteCore(versionKey: String) {
+        viewModelScope.launch {
+            val deleted = coreManager.deleteCore(versionKey)
+            if (deleted) {
+                refreshCores()
+                _uiEvents.emit(UiEvent.ShowMessage("Removed Godot $versionKey core"))
+            } else {
+                _uiEvents.emit(UiEvent.ShowMessage("Failed to remove core"))
+            }
         }
     }
 }

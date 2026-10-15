@@ -2,6 +2,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application>
         <!-- Isolated process host for Godot runner -->
+        <activity
+            android:name="com.godotdroid.runtime.activity.GodotRunnerActivity"
+            android:process=":godot_runner"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|keyboardHidden|screenSize|smallestScreenSize|density|screenLayout|uiMode|navigation"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:launchMode="singleTask"
+            android:exported="false" />
+
         <service
             android:name="com.godotdroid.runtime.service.GodotRunnerService"
             android:process=":godot_runner"

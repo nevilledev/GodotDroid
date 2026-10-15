@@ -397,4 +397,170 @@ class PckBinaryInspectorTest {
         assertEquals("mobile", parsed.renderingMethod)
         assertEquals(RendererType.MOBILE, parsed.rendererType)
     }
+
+    @Test
+    fun testExtractStandalonePck_FormatV1_RebaseOffsets() {
+        // Construct mock PE EXE (128 bytes) with embedded Godot 3.5 PCK (Format v1)
+        // using absolute offsets in the EXE
+        val peHeaderBytes = ByteArray(128)
+        peHeaderBytes[0] = 'M'.code.toByte()
+        peHeaderBytes[1] = 'Z'.code.toByte()
+        val pckStartOffset = peHeaderBytes.size.toLong()
+
+        val fileContent = "extends Node\nfunc _ready():\n    print(\"Hello Godot 3.5\")\n"
+        val fileBytes = fileContent.toByteArray(Charsets.UTF_8)
+        val path = "res://Main.gd"
+        val pathBytes = path.toByteArray(Charsets.UTF_8)
+        val paddedPathLen = ((pathBytes.size + 3) / 4) * 4
+
+        val headerSize = 84 // 20 + 64 reserved
+        val dirSize = 4 + 4 + paddedPathLen + 8 + 8 + 16
+        val dataOffsetInExe = pckStartOffset + headerSize + dirSize
+
+        val pckSize = headerSize + dirSize + fileBytes.size
+        val totalSize = peHeaderBytes.size + pckSize + 12 // 12-byte trailer
+        val bb = ByteBuffer.allocate(totalSize).order(ByteOrder.LITTLE_ENDIAN)
+
+        // PE bytes
+        bb.put(peHeaderBytes)
+
+        // PCK Header v1
+        bb.putInt(PckConstants.PCK_MAGIC)
+        bb.putInt(1) // Format v1
+        bb.putInt(3) // Major 3
+        bb.putInt(5) // Minor 5
+        bb.putInt(0) // Patch 0
+        bb.put(ByteArray(64)) // 64 bytes reserved
+
+        // Directory
+        bb.putInt(1) // 1 file
+        bb.putInt(pathBytes.size)
+        bb.put(pathBytes)
+        val pad = paddedPathLen - pathBytes.size
+        if (pad > 0) bb.put(ByteArray(pad))
+        bb.putLong(dataOffsetInExe) // Absolute offset in EXE!
+        bb.putLong(fileBytes.size.toLong())
+        val dummyMd5 = ByteArray(16) { 0x35.toByte() }
+        bb.put(dummyMd5)
+
+        // Data
+        bb.put(fileBytes)
+
+        // Trailer
+        bb.putLong(pckSize.toLong())
+        bb.putInt(PckConstants.PCK_MAGIC)
+
+        val exeFile = tempFolder.newFile("game_v1_embedded.exe")
+        FileOutputStream(exeFile).use { it.write(bb.array()) }
+
+        // Inspect original embedded EXE
+        val originalResult = inspector.inspect(exeFile)
+        assertTrue(originalResult.header.isEmbeddedExe)
+        assertEquals(pckStartOffset, originalResult.header.pckStartOffset)
+        assertEquals(1, originalResult.files.size)
+        val originalExtracted = inspector.extractFileBytes(exeFile, originalResult.files[0])
+        assertArrayEquals(fileBytes, originalExtracted)
+
+        // Carve standalone PCK
+        val carvedPck = tempFolder.newFile("game_v1_carved.pck")
+        val transferred = inspector.extractStandalonePck(exeFile, carvedPck, originalResult.header)
+        assertTrue(transferred > 0)
+
+        // Inspect carved standalone PCK
+        val carvedResult = inspector.inspect(carvedPck)
+        assertFalse(carvedResult.header.isEmbeddedExe)
+        assertEquals(0L, carvedResult.header.pckStartOffset)
+        assertEquals(1, carvedResult.files.size)
+
+        val carvedEntry = carvedResult.files[0]
+        assertEquals("res://Main.gd", carvedEntry.path)
+        assertEquals((headerSize + dirSize).toLong(), carvedEntry.fileOffset) // Rebased to 0!
+        assertEquals(fileBytes.size.toLong(), carvedEntry.size)
+
+        val carvedExtracted = inspector.extractFileBytes(carvedPck, carvedEntry)
+        assertArrayEquals(fileBytes, carvedExtracted)
+    }
+
+    @Test
+    fun testExtractStandalonePck_FormatV2_RebaseOffsets() {
+        // Construct mock PE EXE (128 bytes) with embedded Godot 4.2 PCK (Format v2)
+        // packFlags = 0 (PACK_REL_FILEBASE not set), fileBase = pckStartOffset (absolute)
+        val peHeaderBytes = ByteArray(128)
+        peHeaderBytes[0] = 'M'.code.toByte()
+        peHeaderBytes[1] = 'Z'.code.toByte()
+        val pckStartOffset = peHeaderBytes.size.toLong()
+
+        val fileContent = "extends Node\nfunc _ready():\n    print(\"Hello Godot 4.2\")\n"
+        val fileBytes = fileContent.toByteArray(Charsets.UTF_8)
+        val path = "res://Game.gd"
+        val pathBytes = path.toByteArray(Charsets.UTF_8)
+        val paddedPathLen = ((pathBytes.size + 3) / 4) * 4
+
+        val headerSize = 96 // 20 + 4 (flags) + 8 (fileBase) + 64 (reserved)
+        val dirSize = 4 + 4 + paddedPathLen + 8 + 8 + 16 + 4
+        val rawOffset = (headerSize + dirSize).toLong()
+
+        val pckSize = headerSize + dirSize + fileBytes.size
+        val totalSize = peHeaderBytes.size + pckSize + 12
+        val bb = ByteBuffer.allocate(totalSize).order(ByteOrder.LITTLE_ENDIAN)
+
+        // PE bytes
+        bb.put(peHeaderBytes)
+
+        // PCK Header v2: packFlags = 0 (absolute fileBase), fileBase = pckStartOffset
+        bb.putInt(PckConstants.PCK_MAGIC)
+        bb.putInt(2) // Format v2
+        bb.putInt(4) // Major 4
+        bb.putInt(2) // Minor 2
+        bb.putInt(0) // Patch 0
+        bb.putInt(0) // packFlags (PACK_REL_FILEBASE is 0!)
+        bb.putLong(pckStartOffset) // Absolute fileBase
+        bb.put(ByteArray(64))
+
+        // Directory
+        bb.putInt(1)
+        bb.putInt(pathBytes.size)
+        bb.put(pathBytes)
+        val pad = paddedPathLen - pathBytes.size
+        if (pad > 0) bb.put(ByteArray(pad))
+        bb.putLong(rawOffset)
+        bb.putLong(fileBytes.size.toLong())
+        val dummyMd5 = ByteArray(16) { 0x42.toByte() }
+        bb.put(dummyMd5)
+        bb.putInt(0) // entry flags
+
+        // Data
+        bb.put(fileBytes)
+
+        // Trailer
+        bb.putLong(pckSize.toLong())
+        bb.putInt(PckConstants.PCK_MAGIC)
+
+        val exeFile = tempFolder.newFile("game_v2_embedded.exe")
+        FileOutputStream(exeFile).use { it.write(bb.array()) }
+
+        // Inspect original embedded EXE
+        val originalResult = inspector.inspect(exeFile)
+        assertTrue(originalResult.header.isEmbeddedExe)
+        assertEquals(pckStartOffset, originalResult.header.pckStartOffset)
+        assertEquals(pckStartOffset + rawOffset, originalResult.files[0].fileOffset)
+        val originalExtracted = inspector.extractFileBytes(exeFile, originalResult.files[0])
+        assertArrayEquals(fileBytes, originalExtracted)
+
+        // Carve standalone PCK
+        val carvedPck = tempFolder.newFile("game_v2_carved.pck")
+        val transferred = inspector.extractStandalonePck(exeFile, carvedPck, originalResult.header)
+        assertTrue(transferred > 0)
+
+        // Inspect carved standalone PCK
+        val carvedResult = inspector.inspect(carvedPck)
+        assertFalse(carvedResult.header.isEmbeddedExe)
+        assertEquals(0L, carvedResult.header.pckStartOffset)
+        assertTrue((carvedResult.header.packFlags and PckConstants.PACK_REL_FILEBASE) != 0) // PACK_REL_FILEBASE enabled!
+        assertEquals(0L, carvedResult.header.fileBase) // Rebased fileBase
+        assertEquals(rawOffset, carvedResult.files[0].fileOffset) // Rebased to 0 + rawOffset!
+
+        val carvedExtracted = inspector.extractFileBytes(carvedPck, carvedResult.files[0])
+        assertArrayEquals(fileBytes, carvedExtracted)
+    }
 }

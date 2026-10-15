@@ -397,7 +397,9 @@ class PckBinaryInspector {
     }
 
     /**
-     * Extracts standalone .pck portion from an embedded EXE file to targetPckFile.
+     * Extracts standalone .pck portion from an embedded EXE file to targetPckFile,
+     * performing necessary header and directory offset rebasing so all virtual files
+     * resolve accurately at standalone offset 0.
      */
     fun extractStandalonePck(sourceFile: File, targetPckFile: File, header: PckHeader): Long {
         RandomAccessFile(sourceFile, "r").use { srcRaf ->
@@ -414,6 +416,70 @@ class PckBinaryInspector {
                     val count = srcChannel.transferTo(startOffset + transferred, lengthToCopy - transferred, dstChannel)
                     if (count <= 0) break
                     transferred += count
+                }
+
+                if (header.isEmbeddedExe && header.pckStartOffset > 0) {
+                    // Rebase offsets for standalone format
+                    when (header.formatVersion) {
+                        1 -> {
+                            // Format v1: rebase rawOffset in directory entries
+                            val dirOffsetInCarved = header.directoryOffset - header.pckStartOffset
+                            dstChannel.position(dirOffsetInCarved)
+                            val countBuf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
+                            if (dstChannel.read(countBuf) == 4) {
+                                countBuf.flip()
+                                val fileCount = countBuf.getInt()
+
+                                val pathLenBuf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
+                                val offsetBuf = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+
+                                for (i in 0 until fileCount) {
+                                    pathLenBuf.clear()
+                                    if (dstChannel.read(pathLenBuf) < 4) break
+                                    pathLenBuf.flip()
+                                    val pathLength = pathLenBuf.getInt()
+                                    val paddedLength = ((pathLength + 3) / 4) * 4
+
+                                    // Skip path bytes
+                                    dstChannel.position(dstChannel.position() + paddedLength)
+
+                                    val offsetPos = dstChannel.position()
+                                    offsetBuf.clear()
+                                    if (dstChannel.read(offsetBuf) < 8) break
+                                    offsetBuf.flip()
+                                    val rawOffset = offsetBuf.getLong()
+
+                                    if (rawOffset >= header.pckStartOffset) {
+                                        val newOffset = rawOffset - header.pckStartOffset
+                                        offsetBuf.clear()
+                                        offsetBuf.putLong(newOffset)
+                                        offsetBuf.flip()
+                                        dstChannel.position(offsetPos)
+                                        dstChannel.write(offsetBuf)
+                                    }
+
+                                    // Skip size (8) + md5 (16)
+                                    dstChannel.position(offsetPos + 8 + 8 + 16)
+                                }
+                            }
+                        }
+                        2 -> {
+                            // Format v2: ensure PACK_REL_FILEBASE is enabled and fileBase is rebased
+                            val newPackFlags = header.packFlags or PckConstants.PACK_REL_FILEBASE
+                            val newFileBase = header.effectiveFileBase - header.pckStartOffset
+
+                            val patchBuf = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN)
+                            patchBuf.putInt(newPackFlags)
+                            patchBuf.putLong(newFileBase)
+                            patchBuf.flip()
+
+                            dstChannel.position(0x14L)
+                            dstChannel.write(patchBuf)
+                        }
+                        else -> {
+                            // Format v3+: PACK_REL_FILEBASE is always active and fileBase is already relative
+                        }
+                    }
                 }
 
                 return transferred
