@@ -38,7 +38,7 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
 
     private val repository = GameLibraryRepository(application.applicationContext)
     private val inspector = PckBinaryInspector()
-    private val coreManager = CoreManager(application.applicationContext)
+    val coreManager = CoreManager(application.applicationContext)
 
     private val _games = MutableStateFlow<List<SavedGameItem>>(emptyList())
     val games: StateFlow<List<SavedGameItem>> = _games.asStateFlow()

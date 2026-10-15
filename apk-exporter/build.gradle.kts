@@ -24,6 +24,10 @@ android {
         }
     }
 
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -32,13 +36,29 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += "/META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+            excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+        }
+    }
 }
 
 dependencies {
     implementation(project(":pck-inspector"))
+    implementation(project(":runtime-host"))
+    implementation(project(":overlay-controls"))
+
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.core)
 
+    implementation(libs.apksig)
+    implementation(libs.bouncycastle.bcpkix)
+    implementation(libs.bouncycastle.bcprov)
+
     testImplementation(libs.junit)
+    testImplementation("org.json:json:20240303")
     androidTestImplementation(libs.androidx.junit)
 }

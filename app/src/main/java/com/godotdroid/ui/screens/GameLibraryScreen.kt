@@ -57,6 +57,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.godotdroid.data.SavedGameItem
 import com.godotdroid.pck.model.RendererType
 import com.godotdroid.ui.components.CoreManagerSheet
 import com.godotdroid.ui.components.GameCard
@@ -67,6 +68,7 @@ import com.godotdroid.ui.theme.GodotBlue
 import com.godotdroid.ui.theme.SurfaceCardDark
 import com.godotdroid.ui.theme.SurfaceDark
 import com.godotdroid.ui.theme.SurfaceVariantDark
+import com.godotdroid.ui.components.ApkExportSheet
 import com.godotdroid.ui.theme.TextPrimaryDark
 import com.godotdroid.ui.theme.TextSecondaryDark
 import com.godotdroid.ui.theme.TextTertiaryDark
@@ -93,10 +95,11 @@ fun GameLibraryScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val coreSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val exportSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     var showCoreManagerSheet by remember { mutableStateOf(false) }
     var promptInstallData by remember { mutableStateOf<Pair<String, String>?>(null) }
-    var exportDialogGameTitle by remember { mutableStateOf<String?>(null) }
+    var gameToExport by remember { mutableStateOf<SavedGameItem?>(null) }
 
     // SAF File Picker for Games (.exe, .pck)
     val openDocumentLauncher = rememberLauncherForActivityResult(
@@ -110,7 +113,7 @@ fun GameLibraryScreen(
             when (event) {
                 is UiEvent.ShowMessage -> snackbarHostState.showSnackbar(event.message)
                 is UiEvent.ShowLaunchDialog -> {}
-                is UiEvent.ShowExportDialog -> exportDialogGameTitle = event.gameTitle
+                is UiEvent.ShowExportDialog -> gameToExport = selectedGame
                 is UiEvent.PromptCoreInstall -> promptInstallData = event.versionKey to event.gameTitle
                 is UiEvent.LaunchGame -> context.startActivity(event.intent)
             }
@@ -273,7 +276,7 @@ fun GameLibraryScreen(
                     onLaunchGame = { preset, injectSteamStub ->
                         viewModel.launchGame(context, game, preset, injectSteamStub)
                     },
-                    onExportApk = { viewModel.onExportApkClicked(game) },
+                    onExportApk = { gameToExport = game },
                     onDeleteGame = { viewModel.deleteGame(game) }
                 )
             }
@@ -333,28 +336,14 @@ fun GameLibraryScreen(
                 )
             }
 
-            // Export Standalone APK Preview Dialog (Phase 4 Entry Point)
-            exportDialogGameTitle?.let { title ->
-                AlertDialog(
-                    onDismissRequest = { exportDialogGameTitle = null },
-                    icon = { Icon(Icons.Default.RocketLaunch, contentDescription = null, tint = AccentCyan) },
-                    title = { Text("Export Standalone APK (Phase 4)") },
-                    text = {
-                        Text(
-                            "Game: $title\n\n" +
-                                    "Phase 4 Standalone APK repackager interface scaffolded in :apk-exporter. This will package the inspected PCK, inject patched arm64-v8a native extensions, configure AndroidManifest.xml, and produce an installable Android APK.",
-                            fontSize = 13.sp,
-                            lineHeight = 18.sp
-                        )
-                    },
-                    confirmButton = {
-                        TextButton(onClick = { exportDialogGameTitle = null }) {
-                            Text("OK", color = AccentCyan)
-                        }
-                    },
-                    containerColor = SurfaceDark,
-                    titleContentColor = TextPrimaryDark,
-                    textContentColor = TextSecondaryDark
+            // Export Standalone APK Sheet
+            val targetGame = gameToExport
+            if (targetGame != null) {
+                ApkExportSheet(
+                    game = targetGame,
+                    sheetState = exportSheetState,
+                    coreManager = viewModel.coreManager,
+                    onDismiss = { gameToExport = null }
                 )
             }
         }

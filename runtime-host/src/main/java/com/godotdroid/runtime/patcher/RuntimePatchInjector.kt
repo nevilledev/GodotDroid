@@ -78,9 +78,29 @@ class RuntimePatchInjector(private val context: Context) {
         // 3. Stage any available Android ARM64 GDExtension libraries
         stageGdExtensionLibraries(gameDir, jniLibsDir, plugins)
 
-        // 4. Build CLI arguments
+        // 4. Inject virtual files directly into the staged PCK for 100% res:// compatibility
+        var targetPckOrExe = pckOrExeFile
+        try {
+            val filesToInject = mutableMapOf<String, ByteArray>()
+            filesToInject["res://override.cfg"] = overrideContent.toByteArray(Charsets.UTF_8)
+            if (injectSteamStub) {
+                val stubContent = SteamStubGenerator.generateStub(engineMajor)
+                filesToInject["res://godotdroid_steam_stub.gd"] = stubContent.toByteArray(Charsets.UTF_8)
+            }
+            val stagedPck = File(gameDir, "runtime_staged.pck")
+            if (stagedPck.exists()) stagedPck.setWritable(true)
+            val patcher = com.godotdroid.pck.patcher.PckVirtualPatcher()
+            patcher.patchPck(pckOrExeFile, stagedPck, filesToInject)
+            stagedPck.setReadOnly()
+            targetPckOrExe = stagedPck
+        } catch (_: Exception) {
+            // Fallback to original file if virtual patching fails
+            targetPckOrExe = pckOrExeFile
+        }
+
+        // 5. Build CLI arguments
         val cliArgs = buildGodotCliArgs(
-            pckOrExeFile = pckOrExeFile,
+            pckOrExeFile = targetPckOrExe,
             selectedRenderer = selectedRenderer,
             workingDir = gameDir,
             extraArgs = extraCliArgs

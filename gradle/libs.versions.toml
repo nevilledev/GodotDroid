@@ -7,11 +7,16 @@ activityCompose = "1.9.1"
 composeBom = "2024.06.00"
 navigationCompose = "2.7.7"
 coroutines = "1.8.1"
+apksig = "8.3.2"
+bouncycastle = "1.78.1"
 junit = "4.13.2"
 extJunit = "1.2.1"
 espresso = "3.6.1"
 
 [libraries]
+apksig = { group = "com.android.tools.build", name = "apksig", version.ref = "apksig" }
+bouncycastle-bcpkix = { group = "org.bouncycastle", name = "bcpkix-jdk18on", version.ref = "bouncycastle" }
+bouncycastle-bcprov = { group = "org.bouncycastle", name = "bcprov-jdk18on", version.ref = "bouncycastle" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycleRuntimeKtx" }
 androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycleRuntimeKtx" }
