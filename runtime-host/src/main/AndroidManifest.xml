@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Isolated process host for Godot runner -->
+        <service
+            android:name="com.godotdroid.runtime.service.GodotRunnerService"
+            android:process=":godot_runner"
+            android:exported="false" />
+    </application>
+</manifest>
