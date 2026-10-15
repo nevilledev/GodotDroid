@@ -182,29 +182,6 @@ class CoreManager(private val context: Context) {
     }
 
     /**
-     * Deletes an installed core and its binaries.
-     * Compliant with Android 14: re-enables write permission before deleting.
-     */
-    fun deleteCore(versionKey: String): Boolean {
-        val dir = File(coresDir, versionKey)
-        if (!dir.exists()) return false
-
-        val soFile = File(dir, "libgodot_android.so")
-        val dexFile = File(dir, "godot-lib.dex")
-        val manifestFile = File(dir, "core_manifest.json")
-
-        // Unlock read-only permissions
-        soFile.setWritable(true)
-        dexFile.setWritable(true)
-        manifestFile.setWritable(true)
-
-        soFile.delete()
-        dexFile.delete()
-        manifestFile.delete()
-        return dir.delete()
-    }
-
-    /**
      * Imports Godot Android runtime core from any official Godot template zip/apk/tpz archive.
      * Extracts lib/arm64-v8a/libgodot_android.so and classes.dex into cores/{versionKey}.
      */
@@ -223,21 +200,34 @@ class CoreManager(private val context: Context) {
 
             val targetSo = File(targetDir, "libgodot_android.so")
             val targetDex = File(targetDir, "godot-lib.dex")
-
-            val tempSo = File(tempDir, "temp_libgodot.so")
+            val soFilesDir = File(tempDir, "so_files").apply { mkdirs() }
             val tempDex = File(tempDir, "temp_classes.dex")
 
             // Ensure writable before overwriting
-            if (tempSo.exists()) tempSo.setWritable(true)
-            if (tempDex.exists()) tempDex.setWritable(true)
             if (targetSo.exists()) targetSo.setWritable(true)
             if (targetDex.exists()) targetDex.setWritable(true)
 
             var foundSo = false
             var foundDex = false
 
+            // Helper to extract an entry
+            fun handleZipEntry(name: String, stream: InputStream) {
+                if (isArm64So(name)) {
+                    val fileName = name.substringAfterLast('/')
+                    val destSo = File(soFilesDir, fileName)
+                    if (destSo.exists()) destSo.setWritable(true)
+                    FileOutputStream(destSo).use { out -> stream.copyTo(out) }
+                    if (isArm64LibGodot(name)) {
+                        foundSo = true
+                    }
+                } else if (isClassesDex(name) && !foundDex) {
+                    if (tempDex.exists()) tempDex.setWritable(true)
+                    FileOutputStream(tempDex).use { out -> stream.copyTo(out) }
+                    foundDex = true
+                }
+            }
+
             // Read archive bytes or stream
-            val buffer = ByteArray(65536)
             val zipIn = ZipInputStream(inputStream)
             var entry: ZipEntry? = zipIn.nextEntry
 
@@ -255,29 +245,18 @@ class CoreManager(private val context: Context) {
                     var nestedEntry = nestedZipIn.nextEntry
 
                     while (nestedEntry != null) {
-                        val nestedName = nestedEntry.name
-                        if (isArm64LibGodot(nestedName) && !foundSo) {
-                            FileOutputStream(tempSo).use { out -> nestedZipIn.copyTo(out) }
-                            foundSo = true
-                        } else if (isClassesDex(nestedName) && !foundDex) {
-                            FileOutputStream(tempDex).use { out -> nestedZipIn.copyTo(out) }
-                            foundDex = true
-                        }
+                        handleZipEntry(nestedEntry.name, nestedZipIn)
                         nestedZipIn.closeEntry()
                         nestedEntry = nestedZipIn.nextEntry
                     }
-                } else if (isArm64LibGodot(name) && !foundSo) {
-                    onProgress?.invoke(DownloadProgress(50, 100, 50, "Extracting libgodot_android.so..."))
-                    FileOutputStream(tempSo).use { out -> zipIn.copyTo(out) }
-                    foundSo = true
-                } else if (isClassesDex(name) && !foundDex) {
-                    onProgress?.invoke(DownloadProgress(75, 100, 75, "Extracting classes.dex..."))
-                    FileOutputStream(tempDex).use { out -> zipIn.copyTo(out) }
-                    foundDex = true
+                } else {
+                    handleZipEntry(name, zipIn)
                 }
 
                 zipIn.closeEntry()
-                if (foundSo && foundDex) break
+                if (foundSo && foundDex) {
+                    // Continue scanning to grab any other companion .so libraries if present
+                }
                 entry = zipIn.nextEntry
             }
 
@@ -292,17 +271,22 @@ class CoreManager(private val context: Context) {
                 )
             }
 
-            // Move to target directory
-            tempSo.copyTo(targetSo, overwrite = true)
+            // Move extracted dex to target directory
             tempDex.copyTo(targetDex, overwrite = true)
-            tempSo.delete()
             tempDex.delete()
-            tempDir.delete()
-
-            // CRITICAL: Android 14+ W^X Compliance
-            // DexClassLoader will throw SecurityException if dex file or so file is writable!
             targetDex.setReadOnly()
-            targetSo.setReadOnly()
+
+            // Move all extracted .so files to target directory
+            val extractedSos = soFilesDir.listFiles { f -> f.extension == "so" } ?: emptyArray()
+            for (so in extractedSos) {
+                val target = File(targetDir, so.name)
+                if (target.exists()) target.setWritable(true)
+                so.copyTo(target, overwrite = true)
+                so.delete()
+                target.setReadOnly()
+            }
+            soFilesDir.delete()
+            tempDir.delete()
 
             // Compute SHA-256
             val sha256 = calculateSha256(targetSo)
@@ -375,6 +359,23 @@ class CoreManager(private val context: Context) {
             Log.e(TAG, "Failed to download core ${descriptor.versionKey}", e)
             Result.failure(e)
         }
+    }
+
+    fun deleteCore(versionKey: String): Boolean {
+        val dir = File(coresDir, versionKey)
+        if (!dir.exists()) return false
+
+        // Unlock read-only permissions on all extracted binaries before deletion
+        dir.listFiles()?.forEach { file ->
+            file.setWritable(true)
+            file.delete()
+        }
+        return dir.delete()
+    }
+
+    private fun isArm64So(path: String): Boolean {
+        val lower = path.lowercase()
+        return lower.endsWith(".so") && (lower.contains("arm64") || lower.contains("aarch64"))
     }
 
     private fun isArm64LibGodot(path: String): Boolean {

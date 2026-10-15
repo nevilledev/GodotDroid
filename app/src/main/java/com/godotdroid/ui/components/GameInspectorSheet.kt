@@ -46,7 +46,14 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import com.godotdroid.data.SavedGameItem
+import com.godotdroid.overlay.model.DefaultControlPresets
 import com.godotdroid.pck.model.RendererType
 import com.godotdroid.ui.theme.AccentCyan
 import com.godotdroid.ui.theme.ErrorRed
@@ -67,11 +74,18 @@ fun GameInspectorSheet(
     onDismiss: () -> Unit,
     onRendererSelected: (RendererType) -> Unit,
     onExtractPck: () -> Unit,
-    onLaunchGame: () -> Unit,
+    onLaunchGame: (preset: String, injectSteamStub: Boolean) -> Unit,
     onExportApk: () -> Unit,
     onDeleteGame: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var selectedPreset by remember(game.id) {
+        mutableStateOf(DefaultControlPresets.PRESET_PC_KEYBOARD)
+    }
+    var injectSteamStub by remember(game.id) {
+        mutableStateOf(game.report.hasGodotSteam)
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -282,6 +296,136 @@ fun GameInspectorSheet(
                 }
             }
 
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // Touch Controls Preset Selector
+            Text(
+                text = "TOUCH CONTROLS PRESET",
+                color = TextTertiaryDark,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Virtual controls layout applied on game launch",
+                color = TextSecondaryDark,
+                fontSize = 12.sp
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                FilterChip(
+                    selected = selectedPreset == DefaultControlPresets.PRESET_PC_KEYBOARD,
+                    onClick = { selectedPreset = DefaultControlPresets.PRESET_PC_KEYBOARD },
+                    label = { Text("PC WASD + Mouse", fontSize = 12.sp) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = GodotBlue,
+                        selectedLabelColor = Color.White,
+                        containerColor = SurfaceCardDark,
+                        labelColor = TextSecondaryDark
+                    ),
+                    border = FilterChipDefaults.filterChipBorder(
+                        enabled = true,
+                        selected = selectedPreset == DefaultControlPresets.PRESET_PC_KEYBOARD,
+                        borderColor = if (selectedPreset == DefaultControlPresets.PRESET_PC_KEYBOARD) GodotBlue else SurfaceVariantDark
+                    )
+                )
+                FilterChip(
+                    selected = selectedPreset == DefaultControlPresets.PRESET_GAMEPAD,
+                    onClick = { selectedPreset = DefaultControlPresets.PRESET_GAMEPAD },
+                    label = { Text("Standard Gamepad", fontSize = 12.sp) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = GodotBlue,
+                        selectedLabelColor = Color.White,
+                        containerColor = SurfaceCardDark,
+                        labelColor = TextSecondaryDark
+                    ),
+                    border = FilterChipDefaults.filterChipBorder(
+                        enabled = true,
+                        selected = selectedPreset == DefaultControlPresets.PRESET_GAMEPAD,
+                        borderColor = if (selectedPreset == DefaultControlPresets.PRESET_GAMEPAD) GodotBlue else SurfaceVariantDark
+                    )
+                )
+                FilterChip(
+                    selected = selectedPreset == DefaultControlPresets.PRESET_POINT_AND_CLICK,
+                    onClick = { selectedPreset = DefaultControlPresets.PRESET_POINT_AND_CLICK },
+                    label = { Text("Trackpad Point & Click", fontSize = 12.sp) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = GodotBlue,
+                        selectedLabelColor = Color.White,
+                        containerColor = SurfaceCardDark,
+                        labelColor = TextSecondaryDark
+                    ),
+                    border = FilterChipDefaults.filterChipBorder(
+                        enabled = true,
+                        selected = selectedPreset == DefaultControlPresets.PRESET_POINT_AND_CLICK,
+                        borderColor = if (selectedPreset == DefaultControlPresets.PRESET_POINT_AND_CLICK) GodotBlue else SurfaceVariantDark
+                    )
+                )
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // Compatibility & GodotSteam Stubs
+            Text(
+                text = "COMPATIBILITY & STUBS",
+                color = TextTertiaryDark,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(SurfaceCardDark)
+                    .border(1.dp, SurfaceVariantDark, RoundedCornerShape(10.dp))
+                    .padding(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Inject GodotSteam Bypass Stub",
+                            color = TextPrimaryDark,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = if (game.report.hasGodotSteam) {
+                                "GodotSteam detected. Injects GDScript Steam autoload stub to prevent crashes."
+                            } else {
+                                "Inject dummy Steam singleton in case game attempts to call Steamworks API."
+                            },
+                            color = TextSecondaryDark,
+                            fontSize = 11.sp
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Switch(
+                        checked = injectSteamStub,
+                        onCheckedChange = { injectSteamStub = it },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = GodotBlue,
+                            uncheckedThumbColor = TextTertiaryDark,
+                            uncheckedTrackColor = SurfaceVariantDark
+                        )
+                    )
+                }
+            }
+
             Spacer(modifier = Modifier.height(24.dp))
             HorizontalDivider(color = SurfaceVariantDark)
             Spacer(modifier = Modifier.height(16.dp))
@@ -310,15 +454,15 @@ fun GameInspectorSheet(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Launch Game (Phase 2)
+            // Launch Game
             Button(
-                onClick = onLaunchGame,
+                onClick = { onLaunchGame(selectedPreset, injectSteamStub) },
                 modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.buttonColors(containerColor = GodotBlue)
             ) {
                 Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
                 Spacer(modifier = Modifier.width(8.dp))
-                Text(text = "Launch Game (Phase 2)", fontWeight = FontWeight.Bold)
+                Text(text = "Launch Game", fontWeight = FontWeight.Bold)
             }
 
             Spacer(modifier = Modifier.height(8.dp))

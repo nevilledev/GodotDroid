@@ -50,24 +50,35 @@ class RuntimePatchInjector(private val context: Context) {
         selectedRenderer: RendererType,
         mainSceneOverride: String? = null,
         plugins: List<PluginDependency> = emptyList(),
+        injectSteamStub: Boolean = false,
+        engineMajor: Int = 4,
         extraCliArgs: List<String> = emptyList()
     ): RuntimeEnvironment {
         val gameDir = File(runtimeBaseDir, gameId).apply { mkdirs() }
         val jniLibsDir = File(gameDir, "jniLibs").apply { mkdirs() }
 
-        // 1. Generate override.cfg
+        // 1. Generate GodotSteam stub if requested
+        if (injectSteamStub) {
+            SteamStubGenerator.writeStubToDirectory(gameDir, engineMajor)
+        }
+
+        // 2. Generate override.cfg
         val overrideCfgFile = File(gameDir, "override.cfg")
         if (overrideCfgFile.exists()) {
             overrideCfgFile.setWritable(true)
         }
-        val overrideContent = generateOverrideCfg(selectedRenderer, mainSceneOverride)
+        val overrideContent = generateOverrideCfg(
+            renderer = selectedRenderer,
+            mainSceneOverride = mainSceneOverride,
+            injectSteamStub = injectSteamStub
+        )
         overrideCfgFile.writeText(overrideContent, Charsets.UTF_8)
         overrideCfgFile.setReadOnly()
 
-        // 2. Stage any available Android ARM64 GDExtension libraries
+        // 3. Stage any available Android ARM64 GDExtension libraries
         stageGdExtensionLibraries(gameDir, jniLibsDir, plugins)
 
-        // 3. Build CLI arguments
+        // 4. Build CLI arguments
         val cliArgs = buildGodotCliArgs(
             pckOrExeFile = pckOrExeFile,
             selectedRenderer = selectedRenderer,
@@ -89,7 +100,8 @@ class RuntimePatchInjector(private val context: Context) {
      */
     fun generateOverrideCfg(
         renderer: RendererType,
-        mainSceneOverride: String? = null
+        mainSceneOverride: String? = null,
+        injectSteamStub: Boolean = false
     ): String {
         val sb = StringBuilder()
 
@@ -125,6 +137,12 @@ class RuntimePatchInjector(private val context: Context) {
             sb.appendLine()
             sb.appendLine("[application]")
             sb.appendLine("run/main_scene=\"$mainSceneOverride\"")
+        }
+
+        if (injectSteamStub) {
+            sb.appendLine()
+            sb.appendLine("[autoload]")
+            sb.appendLine("Steam=\"*res://godotdroid_steam_stub.gd\"")
         }
 
         return sb.toString()

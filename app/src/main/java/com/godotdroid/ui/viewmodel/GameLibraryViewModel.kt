@@ -146,7 +146,12 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    fun launchGame(context: Context, game: SavedGameItem) {
+    fun launchGame(
+        context: Context,
+        game: SavedGameItem,
+        controlPreset: String = com.godotdroid.overlay.model.DefaultControlPresets.PRESET_PC_KEYBOARD,
+        injectSteamStub: Boolean = false
+    ) {
         viewModelScope.launch {
             val major = game.report.pckHeader.engineMajor
             val minor = game.report.pckHeader.engineMinor
@@ -167,7 +172,9 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 filePath = game.filePath,
                 renderer = game.selectedRenderer,
                 versionKey = matchingCore.versionKey,
-                mainSceneOverride = game.report.mainScene
+                mainSceneOverride = game.report.mainScene,
+                injectSteamStub = injectSteamStub,
+                controlPreset = controlPreset
             )
 
             _uiEvents.emit(UiEvent.LaunchGame(intent))

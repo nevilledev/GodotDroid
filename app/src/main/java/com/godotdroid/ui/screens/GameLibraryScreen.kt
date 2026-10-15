@@ -270,7 +270,9 @@ fun GameLibraryScreen(
                         viewModel.updateRendererOverride(game, renderer)
                     },
                     onExtractPck = { viewModel.extractStandalonePck(game) },
-                    onLaunchGame = { viewModel.launchGame(context, game) },
+                    onLaunchGame = { preset, injectSteamStub ->
+                        viewModel.launchGame(context, game, preset, injectSteamStub)
+                    },
                     onExportApk = { viewModel.onExportApkClicked(game) },
                     onDeleteGame = { viewModel.deleteGame(game) }
                 )

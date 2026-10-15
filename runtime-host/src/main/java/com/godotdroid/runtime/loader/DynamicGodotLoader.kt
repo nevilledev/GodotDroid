@@ -11,15 +11,17 @@ import com.godotdroid.runtime.patcher.RuntimeEnvironment
 import dalvik.system.DexClassLoader
 import java.io.File
 import java.lang.reflect.Method
+import java.lang.reflect.Proxy
 
 /**
  * Android 14+ W^X Safe Dynamic Engine Loader.
- * Uses DexClassLoader and System.load to load isolated Godot versions into the :godot_runner process.
+ * Uses DexClassLoader, companion library loading, and dynamic GodotHost proxy binding.
  */
 class DynamicGodotLoader(private val context: Context) {
 
     interface IEngineInstance {
         val renderView: View?
+        val classLoader: ClassLoader
         fun onStart()
         fun onResume()
         fun onPause()
@@ -65,11 +67,23 @@ class DynamicGodotLoader(private val context: Context) {
                 context.classLoader
             )
 
-            // 4. Load native library libgodot_android.so
-            Log.i(TAG, "Loading native library: ${core.soFile.absolutePath}")
+            // 4. Load companion native libraries if present (libc++_shared.so)
+            val cPlusPlusSo = File(core.coreDir, "libc++_shared.so")
+            if (cPlusPlusSo.exists()) {
+                Log.i(TAG, "Loading companion native library: ${cPlusPlusSo.absolutePath}")
+                if (cPlusPlusSo.canWrite()) cPlusPlusSo.setReadOnly()
+                try {
+                    System.load(cPlusPlusSo.absolutePath)
+                } catch (e: UnsatisfiedLinkError) {
+                    Log.w(TAG, "Could not pre-load libc++_shared.so: ${e.message}")
+                }
+            }
+
+            // 5. Load main engine native library libgodot_android.so
+            Log.i(TAG, "Loading native engine library: ${core.soFile.absolutePath}")
             System.load(core.soFile.absolutePath)
 
-            // 5. Reflectively instantiate org.godotengine.godot.Godot
+            // 6. Reflectively load org.godotengine.godot.Godot
             val godotClass = try {
                 classLoader.loadClass("org.godotengine.godot.Godot")
             } catch (e: ClassNotFoundException) {
@@ -81,7 +95,13 @@ class DynamicGodotLoader(private val context: Context) {
                 }
             }
 
-            val instance = instantiateGodotEngine(godotClass, activity, container, environment.cliArgs)
+            val instance = instantiateGodotEngine(
+                classLoader = classLoader,
+                godotClass = godotClass,
+                activity = activity,
+                container = container,
+                cliArgs = environment.cliArgs
+            )
             return Result.success(instance)
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to load and initialize Godot engine", t)
@@ -89,7 +109,63 @@ class DynamicGodotLoader(private val context: Context) {
         }
     }
 
+    /**
+     * Creates a dynamic proxy implementing org.godotengine.godot.GodotHost.
+     */
+    fun createGodotHostProxy(
+        classLoader: ClassLoader,
+        activity: Activity,
+        cliArgs: Array<String>,
+        godotInstanceProvider: () -> Any?
+    ): Any? {
+        val godotHostClass = try {
+            classLoader.loadClass("org.godotengine.godot.GodotHost")
+        } catch (_: ClassNotFoundException) {
+            null
+        } ?: return null
+
+        return Proxy.newProxyInstance(
+            classLoader,
+            arrayOf(godotHostClass)
+        ) { _, method, args ->
+            when (method.name) {
+                "getActivity" -> activity
+                "getCommandLine" -> java.util.ArrayList(cliArgs.toList())
+                "getHostPlugins" -> emptySet<Any>()
+                "getGodot" -> godotInstanceProvider()
+                "onGodotSetupCompleted" -> {
+                    Log.i(TAG, "GodotHost: onGodotSetupCompleted")
+                    null
+                }
+                "onGodotMainLoopStarted" -> {
+                    Log.i(TAG, "GodotHost: onGodotMainLoopStarted")
+                    null
+                }
+                "onGodotForceQuit" -> {
+                    Log.i(TAG, "GodotHost: onGodotForceQuit (code=${args?.getOrNull(0)})")
+                    null
+                }
+                "onGodotRestart" -> {
+                    Log.i(TAG, "GodotHost: onGodotRestart")
+                    null
+                }
+                "equals" -> false
+                "hashCode" -> System.identityHashCode(this)
+                "toString" -> "GodotHostProxy[Activity=${activity.componentName}]"
+                else -> {
+                    when (method.returnType) {
+                        Boolean::class.java, java.lang.Boolean::class.java -> false
+                        Int::class.java, java.lang.Integer::class.java -> 0
+                        Void.TYPE -> null
+                        else -> null
+                    }
+                }
+            }
+        }
+    }
+
     private fun instantiateGodotEngine(
+        classLoader: ClassLoader,
         godotClass: Class<*>,
         activity: Activity,
         container: FrameLayout,
@@ -97,20 +173,46 @@ class DynamicGodotLoader(private val context: Context) {
     ): IEngineInstance {
         Log.i(TAG, "Binding Godot class: ${godotClass.name}")
 
-        // In Godot 4: constructor is Godot(Context) or Godot(Activity)
         var godotInstance: Any? = null
-        try {
-            val constructor = godotClass.getConstructor(Context::class.java)
-            godotInstance = constructor.newInstance(activity)
-        } catch (_: Exception) {
+        val godotHostClass = try {
+            classLoader.loadClass("org.godotengine.godot.GodotHost")
+        } catch (_: ClassNotFoundException) {
+            null
+        }
+
+        val godotHostProxy = if (godotHostClass != null) {
+            createGodotHostProxy(classLoader, activity, cliArgs) { godotInstance }
+        } else null
+
+        // In Godot 4.3+: constructor may take GodotHost
+        if (godotHostClass != null && godotHostProxy != null) {
             try {
-                val constructor = godotClass.getConstructor(Activity::class.java)
+                val constructor = godotClass.getConstructor(godotHostClass)
+                godotInstance = constructor.newInstance(godotHostProxy)
+            } catch (_: Exception) {
+                try {
+                    val constructor = godotClass.getConstructor(Activity::class.java, godotHostClass)
+                    godotInstance = constructor.newInstance(activity, godotHostProxy)
+                } catch (_: Exception) {
+                }
+            }
+        }
+
+        // Fallbacks for earlier Godot versions: Godot(Context) or Godot(Activity)
+        if (godotInstance == null) {
+            try {
+                val constructor = godotClass.getConstructor(Context::class.java)
                 godotInstance = constructor.newInstance(activity)
             } catch (_: Exception) {
                 try {
-                    val defaultConstructor = godotClass.getConstructor()
-                    godotInstance = defaultConstructor.newInstance()
+                    val constructor = godotClass.getConstructor(Activity::class.java)
+                    godotInstance = constructor.newInstance(activity)
                 } catch (_: Exception) {
+                    try {
+                        val defaultConstructor = godotClass.getConstructor()
+                        godotInstance = defaultConstructor.newInstance()
+                    } catch (_: Exception) {
+                    }
                 }
             }
         }
@@ -130,11 +232,26 @@ class DynamicGodotLoader(private val context: Context) {
         if (godotInstance != null && initMethod != null) {
             try {
                 initMethod.isAccessible = true
-                val paramCount = initMethod.parameterTypes.size
-                if (paramCount == 2 && initMethod.parameterTypes[1] == Array<String>::class.java) {
-                    initMethod.invoke(godotInstance, activity, cliArgs)
-                } else if (paramCount == 1 && initMethod.parameterTypes[0] == Array<String>::class.java) {
-                    initMethod.invoke(godotInstance, cliArgs)
+                val paramTypes = initMethod.parameterTypes
+                when (paramTypes.size) {
+                    2 -> {
+                        if (godotHostClass != null && paramTypes[0].isAssignableFrom(godotHostClass)) {
+                            initMethod.invoke(godotInstance, godotHostProxy, cliArgs)
+                        } else if (paramTypes[1] == Array<String>::class.java) {
+                            initMethod.invoke(godotInstance, activity, cliArgs)
+                        } else if (paramTypes[1] == java.util.List::class.java) {
+                            initMethod.invoke(godotInstance, activity, java.util.ArrayList(cliArgs.toList()))
+                        }
+                    }
+                    1 -> {
+                        if (godotHostClass != null && paramTypes[0].isAssignableFrom(godotHostClass)) {
+                            initMethod.invoke(godotInstance, godotHostProxy)
+                        } else if (paramTypes[0] == Array<String>::class.java) {
+                            initMethod.invoke(godotInstance, cliArgs)
+                        } else if (paramTypes[0] == java.util.List::class.java) {
+                            initMethod.invoke(godotInstance, java.util.ArrayList(cliArgs.toList()))
+                        }
+                    }
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Could not invoke init method on Godot: ${e.message}")
@@ -169,6 +286,7 @@ class DynamicGodotLoader(private val context: Context) {
 
         return object : IEngineInstance {
             override val renderView: View? get() = renderView
+            override val classLoader: ClassLoader get() = classLoader
 
             override fun onStart() {
                 try {

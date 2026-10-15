@@ -1,6 +1,5 @@
 package com.godotdroid.runtime.activity
 
-import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -14,13 +13,19 @@ import android.widget.FrameLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.godotdroid.overlay.model.DefaultControlPresets
 import com.godotdroid.pck.model.RendererType
 import com.godotdroid.runtime.core.CoreManager
+import com.godotdroid.runtime.input.GodotInputBridge
 import com.godotdroid.runtime.loader.DynamicGodotLoader
 import com.godotdroid.runtime.patcher.RuntimePatchInjector
+import com.godotdroid.runtime.ui.GodotRunnerOverlayScreen
 import java.io.File
 
 /**
@@ -28,7 +33,7 @@ import java.io.File
  * Executes the loaded Godot engine inside an immersive landscape container and terminates
  * its PID on exit to prevent native symbol collisions across engine versions.
  */
-class GodotRunnerActivity : Activity() {
+class GodotRunnerActivity : ComponentActivity() {
 
     private lateinit var rootContainer: FrameLayout
     private lateinit var coreManager: CoreManager
@@ -36,6 +41,8 @@ class GodotRunnerActivity : Activity() {
     private lateinit var dynamicLoader: DynamicGodotLoader
 
     private var engineInstance: DynamicGodotLoader.IEngineInstance? = null
+    private var inputBridge: GodotInputBridge? = null
+    private var composeOverlay: ComposeView? = null
     private var currentGameId: String = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -74,6 +81,8 @@ class GodotRunnerActivity : Activity() {
         val rendererName = intent.getStringExtra(EXTRA_RENDERER) ?: RendererType.MOBILE.name
         val versionKey = intent.getStringExtra(EXTRA_VERSION_KEY) ?: "4.3"
         val mainSceneOverride = intent.getStringExtra(EXTRA_MAIN_SCENE_OVERRIDE)
+        val injectSteamStub = intent.getBooleanExtra(EXTRA_INJECT_STEAM_STUB, false)
+        val controlPreset = intent.getStringExtra(EXTRA_CONTROL_PRESET) ?: DefaultControlPresets.PRESET_PC_KEYBOARD
 
         currentGameId = gameId
         val renderer = try {
@@ -93,11 +102,10 @@ class GodotRunnerActivity : Activity() {
         showLoadingIndicator(gameTitle, versionKey)
 
         // 4. Find matching installed core
+        val major = versionKey.substringBefore('.').toIntOrNull() ?: 4
+        val minor = versionKey.substringAfter('.').toIntOrNull() ?: 3
         val core = coreManager.getCore(versionKey)
-            ?: coreManager.findMatchingCore(
-                versionKey.substringBefore('.').toIntOrNull() ?: 4,
-                versionKey.substringAfter('.').toIntOrNull() ?: 3
-            )
+            ?: coreManager.findMatchingCore(major, minor)
 
         if (core == null) {
             Toast.makeText(
@@ -111,15 +119,24 @@ class GodotRunnerActivity : Activity() {
 
         Log.i(TAG, "Launching $gameTitle with core ${core.engineVersion} (${core.versionKey})")
 
-        // 5. Prepare runtime environment (override.cfg, CLI args, plugins)
+        // 5. Prepare runtime environment (override.cfg, CLI args, plugins, Steam stub)
         val environment = patchInjector.prepareRuntimeEnvironment(
             gameId = gameId.ifBlank { "game_${System.currentTimeMillis()}" },
             pckOrExeFile = targetFile,
             selectedRenderer = renderer,
-            mainSceneOverride = mainSceneOverride
+            mainSceneOverride = mainSceneOverride,
+            injectSteamStub = injectSteamStub,
+            engineMajor = major
         )
 
-        // 6. Dynamically load and initialize Godot
+        // 6. Instantiate Hybrid Input Bridge
+        inputBridge = GodotInputBridge(
+            activity = this,
+            targetViewProvider = { engineInstance?.renderView },
+            classLoaderProvider = { engineInstance?.classLoader }
+        )
+
+        // 7. Dynamically load and initialize Godot
         val result = dynamicLoader.loadAndInitialize(
             core = core,
             environment = environment,
@@ -130,6 +147,28 @@ class GodotRunnerActivity : Activity() {
         result.onSuccess { instance ->
             engineInstance = instance
             hideLoadingIndicator()
+
+            // 8. Embed Touch Controls Overlay & Floating HUD above Godot SurfaceView
+            val overlay = ComposeView(this).apply {
+                setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+                setContent {
+                    GodotRunnerOverlayScreen(
+                        gameId = currentGameId,
+                        initialPreset = controlPreset,
+                        inputDispatcher = inputBridge,
+                        onExitGame = { finish() }
+                    )
+                }
+            }
+            composeOverlay = overlay
+            rootContainer.addView(
+                overlay,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+
             instance.onStart()
             instance.onResume()
         }.onFailure { error ->
@@ -216,6 +255,8 @@ class GodotRunnerActivity : Activity() {
     override fun onDestroy() {
         engineInstance?.onDestroy()
         engineInstance = null
+        inputBridge = null
+        composeOverlay = null
 
         if (currentGameId.isNotBlank()) {
             patchInjector.cleanupRuntimeEnvironment(currentGameId)
@@ -237,6 +278,8 @@ class GodotRunnerActivity : Activity() {
         const val EXTRA_RENDERER = "extra_renderer"
         const val EXTRA_VERSION_KEY = "extra_version_key"
         const val EXTRA_MAIN_SCENE_OVERRIDE = "extra_main_scene_override"
+        const val EXTRA_INJECT_STEAM_STUB = "extra_inject_steam_stub"
+        const val EXTRA_CONTROL_PRESET = "extra_control_preset"
 
         fun createIntent(
             context: Context,
@@ -245,7 +288,9 @@ class GodotRunnerActivity : Activity() {
             filePath: String,
             renderer: RendererType,
             versionKey: String,
-            mainSceneOverride: String? = null
+            mainSceneOverride: String? = null,
+            injectSteamStub: Boolean = false,
+            controlPreset: String = DefaultControlPresets.PRESET_PC_KEYBOARD
         ): Intent {
             return Intent(context, GodotRunnerActivity::class.java).apply {
                 putExtra(EXTRA_GAME_ID, gameId)
@@ -254,6 +299,8 @@ class GodotRunnerActivity : Activity() {
                 putExtra(EXTRA_RENDERER, renderer.name)
                 putExtra(EXTRA_VERSION_KEY, versionKey)
                 putExtra(EXTRA_MAIN_SCENE_OVERRIDE, mainSceneOverride)
+                putExtra(EXTRA_INJECT_STEAM_STUB, injectSteamStub)
+                putExtra(EXTRA_CONTROL_PRESET, controlPreset)
             }
         }
     }
