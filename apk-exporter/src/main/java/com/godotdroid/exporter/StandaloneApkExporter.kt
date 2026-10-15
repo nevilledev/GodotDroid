@@ -53,14 +53,14 @@ class StandaloneApkExporter(
             try {
                 // 1. Prepare override.cfg and GodotSteam stub
                 onProgress?.invoke("Patching game package with runtime configuration...", 0.10f)
+                val engineMajor = request.engineVersionKey.substringBefore('.').toIntOrNull() ?: 4
                 val patchInjector = RuntimePatchInjector(context)
                 val overrideCfg = patchInjector.generateOverrideCfg(
                     renderer = request.selectedRenderer,
                     mainSceneOverride = null,
-                    injectSteamStub = request.injectSteamStub
+                    injectSteamStub = request.injectSteamStub,
+                    engineMajor = engineMajor
                 )
-
-                val engineMajor = request.engineVersionKey.substringBefore('.').toIntOrNull() ?: 4
                 val filesToInject = mutableMapOf<String, ByteArray>()
                 filesToInject["res://override.cfg"] = overrideCfg.toByteArray(Charsets.UTF_8)
 

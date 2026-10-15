@@ -87,30 +87,70 @@ class PluginCompatManager(private val context: Context) {
     }
 
     /**
-     * Patches an existing text .gdextension content to ensure android.release.arm64-v8a points to the staged library.
+     * Patches .gdextension (Godot 4) or .gdnlib (Godot 3) configuration file content
+     * to inject Android ARM64 binary paths into [libraries] or [entry] sections.
      */
-    fun patchGdExtensionContent(originalContent: String, stagedRelativeSoPath: String): String {
-        val lines = originalContent.lines().toMutableList()
-        val librariesIndex = lines.indexOfFirst { it.trim().equals("[libraries]", ignoreCase = true) }
+    fun patchExtensionConfigContent(
+        originalIni: String,
+        isGodot4: Boolean,
+        androidSoNames: List<String>
+    ): String {
+        val lines = originalIni.lines().toMutableList()
+        val targetLibs = if (androidSoNames.isEmpty()) listOf("libplugin.so") else androidSoNames
 
-        val arm64Entry = "android.release.arm64-v8a = \"$stagedRelativeSoPath\""
-        val arm64DebugEntry = "android.debug.arm64-v8a = \"$stagedRelativeSoPath\""
+        if (isGodot4) {
+            // Godot 4: [libraries] section
+            var libIdx = lines.indexOfFirst { it.trim().equals("[libraries]", ignoreCase = true) }
+            if (libIdx == -1) {
+                if (lines.isNotEmpty() && lines.last().isNotBlank()) lines.add("")
+                lines.add("[libraries]")
+                libIdx = lines.size - 1
+            }
 
-        if (librariesIndex != -1) {
-            // Check if already present
-            val hasArm64 = lines.any { it.trim().startsWith("android.release.arm64", ignoreCase = true) }
-            if (!hasArm64) {
-                lines.add(librariesIndex + 1, arm64Entry)
-                lines.add(librariesIndex + 2, arm64DebugEntry)
+            var insertOffset = 1
+            for (so in targetLibs) {
+                val path = if (so.startsWith("res://")) so else "res://bin/$so"
+                val releaseEntry = "android.release.arm64-v8a = \"$path\""
+                val debugEntry = "android.debug.arm64-v8a = \"$path\""
+                val plainArm64Entry = "android.release.arm64 = \"$path\""
+
+                if (!lines.any { it.trim().startsWith("android.release.arm64-v8a", ignoreCase = true) }) {
+                    lines.add(libIdx + insertOffset++, releaseEntry)
+                }
+                if (!lines.any { it.trim().startsWith("android.debug.arm64-v8a", ignoreCase = true) }) {
+                    lines.add(libIdx + insertOffset++, debugEntry)
+                }
+                if (!lines.any { it.trim().startsWith("android.release.arm64 =", ignoreCase = true) }) {
+                    lines.add(libIdx + insertOffset++, plainArm64Entry)
+                }
             }
         } else {
-            lines.add("")
-            lines.add("[libraries]")
-            lines.add(arm64Entry)
-            lines.add(arm64DebugEntry)
+            // Godot 3: [entry] section
+            var entryIdx = lines.indexOfFirst { it.trim().equals("[entry]", ignoreCase = true) }
+            if (entryIdx == -1) {
+                if (lines.isNotEmpty() && lines.last().isNotBlank()) lines.add("")
+                lines.add("[entry]")
+                entryIdx = lines.size - 1
+            }
+
+            var insertOffset = 1
+            for (so in targetLibs) {
+                val path = if (so.startsWith("res://")) so else "res://bin/$so"
+                val entryLine = "Android.arm64-v8a=\"$path\""
+                if (!lines.any { it.trim().startsWith("Android.arm64-v8a", ignoreCase = true) }) {
+                    lines.add(entryIdx + insertOffset++, entryLine)
+                }
+            }
         }
 
         return lines.joinToString("\n")
+    }
+
+    /**
+     * Patches an existing text .gdextension content to ensure android.release.arm64-v8a points to the staged library.
+     */
+    fun patchGdExtensionContent(originalContent: String, stagedRelativeSoPath: String): String {
+        return patchExtensionConfigContent(originalContent, isGodot4 = true, listOf(stagedRelativeSoPath))
     }
 
     /**

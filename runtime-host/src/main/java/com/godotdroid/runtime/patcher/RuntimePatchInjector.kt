@@ -39,7 +39,7 @@ data class RuntimeEnvironment(
  */
 class RuntimePatchInjector(private val context: Context) {
 
-    private val runtimeBaseDir = File(context.filesDir, "runtime_env").apply { mkdirs() }
+    private val runtimeBaseDir by lazy { File(context.filesDir, "runtime_env").apply { mkdirs() } }
 
     /**
      * Prepares isolated working directory, generates override.cfg, stages plugins, and builds CLI args.
@@ -70,7 +70,8 @@ class RuntimePatchInjector(private val context: Context) {
         val overrideContent = generateOverrideCfg(
             renderer = selectedRenderer,
             mainSceneOverride = mainSceneOverride,
-            injectSteamStub = injectSteamStub
+            injectSteamStub = injectSteamStub,
+            engineMajor = engineMajor
         )
         overrideCfgFile.writeText(overrideContent, Charsets.UTF_8)
         overrideCfgFile.setReadOnly()
@@ -87,6 +88,32 @@ class RuntimePatchInjector(private val context: Context) {
                 val stubContent = SteamStubGenerator.generateStub(engineMajor)
                 filesToInject["res://godotdroid_steam_stub.gd"] = stubContent.toByteArray(Charsets.UTF_8)
             }
+
+            // In-PCK .gdextension & .gdnlib rewriting
+            val pluginCompat = PluginCompatManager(context)
+            for (plugin in plugins) {
+                if (plugin.configPath.isNotBlank()) {
+                    var originalConfigText = ""
+                    try {
+                        java.io.RandomAccessFile(pckOrExeFile, "r").use { raf ->
+                            val inspector = com.godotdroid.pck.inspector.PckBinaryInspector()
+                            val inspectResult = inspector.inspect(raf.channel, raf.length())
+                            val entry = inspectResult.files.find { it.path == plugin.configPath }
+                            if (entry != null) {
+                                originalConfigText = String(inspector.extractFileBytes(raf.channel, entry), Charsets.UTF_8)
+                            }
+                        }
+                    } catch (_: Exception) {}
+
+                    val patchedConfig = pluginCompat.patchExtensionConfigContent(
+                        originalIni = originalConfigText,
+                        isGodot4 = (engineMajor >= 4),
+                        androidSoNames = plugin.androidLibraries.values.map { it.substringAfterLast('/') }.ifEmpty { listOf("${plugin.name}.so") }
+                    )
+                    filesToInject[plugin.configPath] = patchedConfig.toByteArray(Charsets.UTF_8)
+                }
+            }
+
             val stagedPck = File(gameDir, "runtime_staged.pck")
             if (stagedPck.exists()) stagedPck.setWritable(true)
             val patcher = com.godotdroid.pck.patcher.PckVirtualPatcher()
@@ -103,6 +130,7 @@ class RuntimePatchInjector(private val context: Context) {
             pckOrExeFile = targetPckOrExe,
             selectedRenderer = selectedRenderer,
             workingDir = gameDir,
+            engineMajor = engineMajor,
             extraArgs = extraCliArgs
         )
 
@@ -121,37 +149,59 @@ class RuntimePatchInjector(private val context: Context) {
     fun generateOverrideCfg(
         renderer: RendererType,
         mainSceneOverride: String? = null,
-        injectSteamStub: Boolean = false
+        injectSteamStub: Boolean = false,
+        engineMajor: Int = 4
     ): String {
         val sb = StringBuilder()
-
         sb.appendLine("; GodotDroid Auto-Generated Runtime Compatibility Config")
-        sb.appendLine("[rendering]")
 
-        when (renderer) {
-            RendererType.GL_COMPATIBILITY -> {
-                sb.appendLine("renderer/rendering_method=\"gl_compatibility\"")
-                sb.appendLine("renderer/rendering_method.mobile=\"gl_compatibility\"")
-                sb.appendLine("driver/driver.android=\"opengl3\"")
-                sb.appendLine("renderer/rendering_method.web=\"gl_compatibility\"")
+        if (engineMajor >= 4) {
+            sb.appendLine("[rendering]")
+            when (renderer) {
+                RendererType.GL_COMPATIBILITY, RendererType.GLES2, RendererType.GLES3 -> {
+                    sb.appendLine("renderer/rendering_method=\"gl_compatibility\"")
+                    sb.appendLine("renderer/rendering_method.mobile=\"gl_compatibility\"")
+                    sb.appendLine("driver/driver.android=\"opengl3\"")
+                    sb.appendLine("renderer/rendering_method.web=\"gl_compatibility\"")
+                }
+                RendererType.FORWARD_PLUS -> {
+                    sb.appendLine("renderer/rendering_method=\"forward_plus\"")
+                    sb.appendLine("driver/driver.android=\"vulkan\"")
+                }
+                RendererType.MOBILE, RendererType.UNKNOWN -> {
+                    sb.appendLine("renderer/rendering_method=\"mobile\"")
+                    sb.appendLine("renderer/rendering_method.mobile=\"mobile\"")
+                    sb.appendLine("driver/driver.android=\"vulkan\"")
+                    sb.appendLine("renderer/rendering_method.web=\"gl_compatibility\"")
+                }
             }
-            RendererType.FORWARD_PLUS -> {
-                sb.appendLine("renderer/rendering_method=\"forward_plus\"")
-                sb.appendLine("driver/driver.android=\"vulkan\"")
+            sb.appendLine("textures/vram_compression/import_s3tc_bptc=true")
+            sb.appendLine("textures/vram_compression/import_etc2_astc=true")
+
+            sb.appendLine()
+            sb.appendLine("[display]")
+            sb.appendLine("window/size/mode=3 ; Fullscreen Mode on Android")
+            sb.appendLine("window/stretch/mode=\"canvas_items\" ; Smooth resolution adaptation for mobile")
+            sb.appendLine("window/stretch/aspect=\"expand\" ; Maintain aspect ratio without black borders")
+        } else {
+            // Godot 3.x
+            sb.appendLine("[rendering]")
+            val driverName = if (renderer == RendererType.GLES2 || renderer == RendererType.GL_COMPATIBILITY) {
+                "GLES2"
+            } else {
+                "GLES3"
             }
-            RendererType.MOBILE, RendererType.UNKNOWN -> {
-                sb.appendLine("renderer/rendering_method=\"mobile\"")
-                sb.appendLine("renderer/rendering_method.mobile=\"mobile\"")
-                sb.appendLine("driver/driver.android=\"vulkan\"")
-                sb.appendLine("renderer/rendering_method.web=\"gl_compatibility\"")
-            }
+            sb.appendLine("quality/driver/driver_name=\"$driverName\"")
+            sb.appendLine("quality/driver/fallback_to_gles2=true")
+            sb.appendLine("vram_compression/import_etc2=true")
+            sb.appendLine("vram_compression/import_s3tc=true")
+
+            sb.appendLine()
+            sb.appendLine("[display]")
+            sb.appendLine("window/handheld/orientation=\"landscape\"")
+            sb.appendLine("window/stretch/mode=\"2d\"")
+            sb.appendLine("window/stretch/aspect=\"expand\"")
         }
-
-        sb.appendLine()
-        sb.appendLine("[display]")
-        sb.appendLine("window/size/mode=3 ; Fullscreen Mode on Android")
-        sb.appendLine("window/stretch/mode=\"canvas_items\" ; Smooth resolution adaptation for mobile")
-        sb.appendLine("window/stretch/aspect=\"expand\" ; Maintain aspect ratio without black borders")
 
         if (!mainSceneOverride.isNullOrBlank()) {
             sb.appendLine()
@@ -175,6 +225,7 @@ class RuntimePatchInjector(private val context: Context) {
         pckOrExeFile: File,
         selectedRenderer: RendererType,
         workingDir: File,
+        engineMajor: Int = 4,
         extraArgs: List<String> = emptyList()
     ): Array<String> {
         val args = mutableListOf<String>()
@@ -183,26 +234,37 @@ class RuntimePatchInjector(private val context: Context) {
         args.add("--main-pack")
         args.add(pckOrExeFile.absolutePath)
 
-        // 2. Rendering Method & Driver
-        when (selectedRenderer) {
-            RendererType.GL_COMPATIBILITY -> {
-                args.add("--rendering-method")
-                args.add("gl_compatibility")
-                args.add("--rendering-driver")
-                args.add("opengl3")
+        // 2. Rendering Method & Driver / Video Driver
+        if (engineMajor >= 4) {
+            when (selectedRenderer) {
+                RendererType.GL_COMPATIBILITY, RendererType.GLES2, RendererType.GLES3 -> {
+                    args.add("--rendering-method")
+                    args.add("gl_compatibility")
+                    args.add("--rendering-driver")
+                    args.add("opengl3")
+                }
+                RendererType.FORWARD_PLUS -> {
+                    args.add("--rendering-method")
+                    args.add("forward_plus")
+                    args.add("--rendering-driver")
+                    args.add("vulkan")
+                }
+                RendererType.MOBILE, RendererType.UNKNOWN -> {
+                    args.add("--rendering-method")
+                    args.add("mobile")
+                    args.add("--rendering-driver")
+                    args.add("vulkan")
+                }
             }
-            RendererType.FORWARD_PLUS -> {
-                args.add("--rendering-method")
-                args.add("forward_plus")
-                args.add("--rendering-driver")
-                args.add("vulkan")
+        } else {
+            // Godot 3.x rejects --rendering-method! Uses --video-driver GLES3|GLES2
+            val videoDriver = if (selectedRenderer == RendererType.GLES2 || selectedRenderer == RendererType.GL_COMPATIBILITY) {
+                "GLES2"
+            } else {
+                "GLES3"
             }
-            RendererType.MOBILE, RendererType.UNKNOWN -> {
-                args.add("--rendering-method")
-                args.add("mobile")
-                args.add("--rendering-driver")
-                args.add("vulkan")
-            }
+            args.add("--video-driver")
+            args.add(videoDriver)
         }
 
         // 3. Audio & display stability

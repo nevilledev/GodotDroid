@@ -258,6 +258,41 @@ class DynamicGodotLoader(private val context: Context) {
             }
         }
 
+        val godotLibClass = try {
+            classLoader.loadClass("org.godotengine.godot.GodotLib")
+        } catch (_: ClassNotFoundException) {
+            null
+        }
+
+        // In Godot 3.x, initialize GodotLib with Activity & Assets, and pass command line
+        if (godotLibClass != null) {
+            try {
+                val initMethod = godotLibClass.methods.find { it.name == "initialize" }
+                if (initMethod != null) {
+                    initMethod.isAccessible = true
+                    when (initMethod.parameterTypes.size) {
+                        3 -> initMethod.invoke(null, activity, activity.assets, false)
+                        2 -> initMethod.invoke(null, activity, activity.assets)
+                        1 -> initMethod.invoke(null, activity)
+                    }
+                    Log.i(TAG, "GodotLib.initialize() invoked for Godot 3 runtime")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "GodotLib.initialize() note: ${e.message}")
+            }
+
+            try {
+                val setupMethod = godotLibClass.methods.find { it.name == "setup" && it.parameterTypes.size == 1 }
+                if (setupMethod != null) {
+                    setupMethod.isAccessible = true
+                    setupMethod.invoke(null, cliArgs)
+                    Log.i(TAG, "GodotLib.setup(cliArgs) invoked for Godot 3 runtime")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "GodotLib.setup() note: ${e.message}")
+            }
+        }
+
         // Find renderView / getView
         if (godotInstance != null) {
             try {
@@ -270,6 +305,28 @@ class DynamicGodotLoader(private val context: Context) {
                 } catch (_: Exception) {
                 }
             }
+        }
+
+        // Godot 3.x view fallbacks
+        if (renderView == null && godotInstance is View) {
+            renderView = godotInstance
+        }
+        if (renderView == null) {
+            try {
+                val godotViewClass = classLoader.loadClass("org.godotengine.godot.GodotView")
+                for (ctor in godotViewClass.constructors) {
+                    try {
+                        val pTypes = ctor.parameterTypes
+                        if (pTypes.size == 1 && pTypes[0].isAssignableFrom(Context::class.java)) {
+                            renderView = ctor.newInstance(activity) as? View
+                            break
+                        } else if (pTypes.size == 1 && pTypes[0].isAssignableFrom(Activity::class.java)) {
+                            renderView = ctor.newInstance(activity) as? View
+                            break
+                        }
+                    } catch (_: Exception) {}
+                }
+            } catch (_: Exception) {}
         }
 
         if (renderView != null) {
@@ -302,9 +359,17 @@ class DynamicGodotLoader(private val context: Context) {
                 } catch (e: Exception) {
                     Log.w(TAG, "Error invoking onResume: ${e.message}")
                 }
+                try {
+                    val focusIn = godotLibClass?.methods?.find { it.name == "focusin" && it.parameterTypes.isEmpty() }
+                    focusIn?.invoke(null)
+                } catch (_: Exception) {}
             }
 
             override fun onPause() {
+                try {
+                    val focusOut = godotLibClass?.methods?.find { it.name == "focusout" && it.parameterTypes.isEmpty() }
+                    focusOut?.invoke(null)
+                } catch (_: Exception) {}
                 try {
                     onPauseMethod?.invoke(godotInstance)
                 } catch (e: Exception) {

@@ -115,6 +115,24 @@ fun RendererBadge(rendererType: RendererType, modifier: Modifier = Modifier) {
                 modifier = modifier
             )
         }
+        RendererType.GLES3 -> {
+            StatusBadge(
+                text = "GLES3 (Godot 3)",
+                textColor = SuccessGreen,
+                backgroundColor = SuccessGreenBg,
+                icon = Icons.Default.CheckCircle,
+                modifier = modifier
+            )
+        }
+        RendererType.GLES2 -> {
+            StatusBadge(
+                text = "GLES2 (Godot 3)",
+                textColor = SuccessGreen,
+                backgroundColor = SuccessGreenBg,
+                icon = Icons.Default.CheckCircle,
+                modifier = modifier
+            )
+        }
         RendererType.UNKNOWN -> {
             StatusBadge(
                 text = "Auto / Default",

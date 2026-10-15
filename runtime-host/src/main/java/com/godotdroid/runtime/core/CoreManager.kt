@@ -29,6 +29,28 @@ class CoreManager(private val context: Context) {
      * Default catalog of officially supported Godot Android runtime cores.
      */
     val builtInRegistry: List<CoreDescriptor> = listOf(
+        // Godot 4.x Cores
+        CoreDescriptor(
+            versionKey = "4.6",
+            displayName = "Godot 4.6 Dev (PCK v4)",
+            engineVersion = "4.6.0",
+            downloadUrl = "https://github.com/godotengine/godot/releases/download/4.6-dev1/godot-lib.4.6.0.dev1.template_release.arm64.zip",
+            sizeBytes = 38_000_000L
+        ),
+        CoreDescriptor(
+            versionKey = "4.5",
+            displayName = "Godot 4.5 Stable (PCK v3)",
+            engineVersion = "4.5.0",
+            downloadUrl = "https://github.com/godotengine/godot/releases/download/4.5-stable/godot-lib.4.5.0.stable.template_release.arm64.zip",
+            sizeBytes = 37_000_000L
+        ),
+        CoreDescriptor(
+            versionKey = "4.4",
+            displayName = "Godot 4.4 Stable (PCK v3)",
+            engineVersion = "4.4.0",
+            downloadUrl = "https://github.com/godotengine/godot/releases/download/4.4-stable/godot-lib.4.4.0.stable.template_release.arm64.zip",
+            sizeBytes = 36_000_000L
+        ),
         CoreDescriptor(
             versionKey = "4.3",
             displayName = "Godot 4.3 Stable (Vulkan / Compatibility)",
@@ -38,32 +60,35 @@ class CoreManager(private val context: Context) {
             isRecommended = true
         ),
         CoreDescriptor(
-            versionKey = "4.4",
-            displayName = "Godot 4.4 Dev/RC (PCK v3)",
-            engineVersion = "4.4.0",
-            downloadUrl = "https://github.com/godotengine/godot/releases/download/4.4-stable/godot-lib.4.4.0.stable.template_release.arm64.zip",
-            sizeBytes = 36_000_000L
-        ),
-        CoreDescriptor(
             versionKey = "4.2",
-            displayName = "Godot 4.2 Stable",
+            displayName = "Godot 4.2.2 Stable",
             engineVersion = "4.2.2",
             downloadUrl = "https://github.com/godotengine/godot/releases/download/4.2.2-stable/godot-lib.4.2.2.stable.template_release.arm64.zip",
             sizeBytes = 34_000_000L
         ),
         CoreDescriptor(
             versionKey = "4.1",
-            displayName = "Godot 4.1 Stable",
+            displayName = "Godot 4.1.3 Stable",
             engineVersion = "4.1.3",
             downloadUrl = "https://github.com/godotengine/godot/releases/download/4.1.3-stable/godot-lib.4.1.3.stable.template_release.arm64.zip",
             sizeBytes = 33_000_000L
         ),
         CoreDescriptor(
             versionKey = "4.0",
-            displayName = "Godot 4.0 Stable",
+            displayName = "Godot 4.0.4 Stable",
             engineVersion = "4.0.4",
             downloadUrl = "https://github.com/godotengine/godot/releases/download/4.0.4-stable/godot-lib.4.0.4.stable.template_release.arm64.zip",
             sizeBytes = 32_000_000L
+        ),
+
+        // Godot 3.x Cores
+        CoreDescriptor(
+            versionKey = "3.6",
+            displayName = "Godot 3.6 Stable (GLES3 / GLES2)",
+            engineVersion = "3.6.0",
+            downloadUrl = "https://github.com/godotengine/godot/releases/download/3.6-stable/godot-lib.3.6.stable.release.arm64.zip",
+            sizeBytes = 30_000_000L,
+            isRecommended = true
         ),
         CoreDescriptor(
             versionKey = "3.5",
@@ -71,6 +96,27 @@ class CoreManager(private val context: Context) {
             engineVersion = "3.5.3",
             downloadUrl = "https://github.com/godotengine/godot/releases/download/3.5.3-stable/godot-lib.3.5.3.stable.release.arm64.zip",
             sizeBytes = 28_000_000L
+        ),
+        CoreDescriptor(
+            versionKey = "3.4",
+            displayName = "Godot 3.4.5 Stable",
+            engineVersion = "3.4.5",
+            downloadUrl = "https://github.com/godotengine/godot/releases/download/3.4.5-stable/godot-lib.3.4.5.stable.release.arm64.zip",
+            sizeBytes = 27_000_000L
+        ),
+        CoreDescriptor(
+            versionKey = "3.3",
+            displayName = "Godot 3.3.4 Stable",
+            engineVersion = "3.3.4",
+            downloadUrl = "https://github.com/godotengine/godot/releases/download/3.3.4-stable/godot-lib.3.3.4.stable.release.arm64.zip",
+            sizeBytes = 26_000_000L
+        ),
+        CoreDescriptor(
+            versionKey = "3.2",
+            displayName = "Godot 3.2.3 Stable",
+            engineVersion = "3.2.3",
+            downloadUrl = "https://github.com/godotengine/godot/releases/download/3.2.3-stable/godot-lib.3.2.3.stable.release.arm64.zip",
+            sizeBytes = 25_000_000L
         )
     )
 

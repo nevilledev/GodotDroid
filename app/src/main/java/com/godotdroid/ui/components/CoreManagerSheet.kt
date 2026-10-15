@@ -5,9 +5,12 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -64,7 +67,7 @@ import com.godotdroid.ui.theme.TextPrimaryDark
 import com.godotdroid.ui.theme.TextSecondaryDark
 import com.godotdroid.ui.theme.TextTertiaryDark
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun CoreManagerSheet(
     installedCores: List<InstalledCore>,
@@ -236,18 +239,20 @@ fun CoreManagerSheet(
                     )
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         // Quick Version Selector buttons for import
-                        val versions = listOf("4.3", "4.4", "4.2", "4.1", "4.0", "3.5")
+                        val versions = listOf("4.6", "4.5", "4.4", "4.3", "4.2", "4.1", "4.0", "3.6", "3.5", "3.4", "3.3", "3.2")
                         for (v in versions) {
                             val isSel = selectedImportVersionKey == v
                             Box(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(if (isSel) GodotBlue else SurfaceVariantDark)
+                                    .clickable { selectedImportVersionKey = v }
                                     .padding(horizontal = 8.dp, vertical = 4.dp)
                             ) {
                                 Text(
@@ -287,17 +292,52 @@ fun CoreManagerSheet(
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.sp
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                for (descriptor in registryCores) {
-                    val isAlreadyInstalled = installedCores.any { it.versionKey == descriptor.versionKey }
-                    RegistryCoreCard(
-                        descriptor = descriptor,
-                        isInstalled = isAlreadyInstalled,
-                        isDownloading = isDownloading,
-                        onDownload = { onDownloadCore(descriptor) }
-                    )
+            // Godot 4.x Cores
+            val godot4Cores = registryCores.filter { it.versionKey.startsWith("4.") }
+            if (godot4Cores.isNotEmpty()) {
+                Text(
+                    text = "Godot 4.x Cores (Vulkan / Compatibility)",
+                    color = AccentCyan,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (descriptor in godot4Cores) {
+                        val isAlreadyInstalled = installedCores.any { it.versionKey == descriptor.versionKey }
+                        RegistryCoreCard(
+                            descriptor = descriptor,
+                            isInstalled = isAlreadyInstalled,
+                            isDownloading = isDownloading,
+                            onDownload = { onDownloadCore(descriptor) }
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+
+            // Godot 3.x Cores
+            val godot3Cores = registryCores.filter { it.versionKey.startsWith("3.") }
+            if (godot3Cores.isNotEmpty()) {
+                Text(
+                    text = "Godot 3.x Cores (GLES3 / GLES2 Classic)",
+                    color = AccentCyan,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (descriptor in godot3Cores) {
+                        val isAlreadyInstalled = installedCores.any { it.versionKey == descriptor.versionKey }
+                        RegistryCoreCard(
+                            descriptor = descriptor,
+                            isInstalled = isAlreadyInstalled,
+                            isDownloading = isDownloading,
+                            onDownload = { onDownloadCore(descriptor) }
+                        )
+                    }
                 }
             }
 

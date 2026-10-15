@@ -1,6 +1,7 @@
 package com.godotdroid.runtime.patcher
 
 import android.app.Activity
+import com.godotdroid.pck.inspector.PckConstants
 import com.godotdroid.pck.model.RendererType
 import com.godotdroid.runtime.loader.DynamicGodotLoader
 import org.godotengine.godot.GodotHost
@@ -10,6 +11,8 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 class PluginCompatTest {
 
@@ -125,5 +128,141 @@ class PluginCompatTest {
         godotHost.onGodotSetupCompleted()
         godotHost.onGodotMainLoopStarted()
         godotHost.onGodotForceQuit(0)
+    }
+
+    @Test
+    fun testPatchExtensionConfigContent_Godot4() {
+        val manager = PluginCompatManager(Activity())
+        val originalIni = """
+            [configuration]
+            entry_symbol = "example_library_init"
+            compatibility_minimum = "4.1"
+
+            [libraries]
+            windows.release.x86_64 = "res://bin/libexample.windows.template_release.x86_64.dll"
+            linux.release.x86_64 = "res://bin/libexample.linux.template_release.x86_64.so"
+        """.trimIndent()
+
+        val patched = manager.patchExtensionConfigContent(
+            originalIni = originalIni,
+            isGodot4 = true,
+            androidSoNames = listOf("libexample.android.template_release.arm64.so")
+        )
+
+        assertTrue(patched.contains("[libraries]"))
+        assertTrue(patched.contains("android.release.arm64-v8a = \"res://bin/libexample.android.template_release.arm64.so\""))
+        assertTrue(patched.contains("android.debug.arm64-v8a = \"res://bin/libexample.android.template_release.arm64.so\""))
+        assertTrue(patched.contains("android.release.arm64 = \"res://bin/libexample.android.template_release.arm64.so\""))
+        assertTrue(patched.contains("windows.release.x86_64"))
+    }
+
+    @Test
+    fun testPatchExtensionConfigContent_Godot3() {
+        val manager = PluginCompatManager(Activity())
+        val originalIni = """
+            [general]
+            singleton=false
+            load_once=true
+            symbol_prefix="godot_"
+            reloadable=true
+
+            [entry]
+            Windows.64="res://bin/win64/libplugin.dll"
+            X11.64="res://bin/x11/libplugin.so"
+
+            [dependencies]
+            Windows.64=[  ]
+            X11.64=[  ]
+        """.trimIndent()
+
+        val patched = manager.patchExtensionConfigContent(
+            originalIni = originalIni,
+            isGodot4 = false,
+            androidSoNames = listOf("libplugin.so")
+        )
+
+        assertTrue(patched.contains("[entry]"))
+        assertTrue(patched.contains("Android.arm64-v8a=\"res://bin/libplugin.so\""))
+        assertTrue(patched.contains("Windows.64="))
+    }
+
+    @Test
+    fun testInPckPluginVirtualPatching() {
+        val manager = PluginCompatManager(Activity())
+        val originalIni = "[libraries]\nwindows.release.x86_64=\"res://bin/libtest.dll\"\n"
+        val patched = manager.patchExtensionConfigContent(originalIni, true, listOf("libtest.so"))
+
+        val tempFolder = File(System.getProperty("java.io.tmpdir"), "godotdroid_plugin_test_${System.currentTimeMillis()}").apply { mkdirs() }
+        try {
+            val sourcePck = File(tempFolder, "source.pck")
+            val targetPck = File(tempFolder, "target.pck")
+
+            val initialBytes = createSyntheticPck(mapOf("res://test.gdextension" to originalIni.toByteArray(Charsets.UTF_8)))
+            sourcePck.writeBytes(initialBytes)
+
+            val patcher = com.godotdroid.pck.patcher.PckVirtualPatcher()
+            val filesToInject = mapOf("res://test.gdextension" to patched.toByteArray(Charsets.UTF_8))
+            patcher.patchPck(sourcePck, targetPck, filesToInject)
+
+            val inspector = com.godotdroid.pck.inspector.PckBinaryInspector()
+            java.io.RandomAccessFile(targetPck, "r").use { raf ->
+                val result = inspector.inspect(raf.channel, raf.length())
+                val entry = result.files.find { it.path == "res://test.gdextension" }
+                assertNotNull("Patched .gdextension should be found in target PCK", entry)
+                val bytes = inspector.extractFileBytes(raf.channel, entry!!)
+                val text = String(bytes, Charsets.UTF_8)
+                assertTrue(text.contains("android.release.arm64-v8a = \"res://bin/libtest.so\""))
+            }
+        } finally {
+            tempFolder.deleteRecursively()
+        }
+    }
+
+    private fun createSyntheticPck(files: Map<String, ByteArray>): ByteArray {
+        val headerSize = 96
+        var dirSize = 4
+        for ((path, _) in files) {
+            val pathBytes = path.toByteArray(Charsets.UTF_8)
+            val paddedPathLen = ((pathBytes.size + 3) / 4) * 4
+            dirSize += 4 + paddedPathLen + 8 + 8 + 16 + 4
+        }
+        val dataOffset = (headerSize + dirSize).toLong()
+        val totalPayloadSize = files.values.sumOf { it.size }
+        val totalSize = dataOffset + totalPayloadSize
+        val bb = ByteBuffer.allocate(totalSize.toInt()).order(ByteOrder.LITTLE_ENDIAN)
+
+        // Header v2
+        bb.putInt(PckConstants.PCK_MAGIC)
+        bb.putInt(2)
+        bb.putInt(4)
+        bb.putInt(2)
+        bb.putInt(0)
+        bb.putInt(PckConstants.PACK_REL_FILEBASE)
+        bb.putLong(0L)
+        bb.put(ByteArray(64))
+
+        // Directory
+        bb.putInt(files.size)
+        var curOffset = dataOffset
+        for ((path, bytes) in files) {
+            val pathBytes = path.toByteArray(Charsets.UTF_8)
+            val paddedPathLen = ((pathBytes.size + 3) / 4) * 4
+            bb.putInt(pathBytes.size)
+            bb.put(pathBytes)
+            val pad = paddedPathLen - pathBytes.size
+            if (pad > 0) bb.put(ByteArray(pad))
+            bb.putLong(curOffset)
+            bb.putLong(bytes.size.toLong())
+            bb.put(ByteArray(16) { 0x11.toByte() })
+            bb.putInt(0)
+            curOffset += bytes.size
+        }
+
+        // Payloads
+        for ((_, bytes) in files) {
+            bb.put(bytes)
+        }
+
+        return bb.array()
     }
 }

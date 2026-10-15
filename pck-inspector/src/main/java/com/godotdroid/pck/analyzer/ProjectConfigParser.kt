@@ -216,8 +216,9 @@ object ProjectConfigParser {
         return when {
             lower.contains("forward_plus") || lower.contains("forward+") -> RendererType.FORWARD_PLUS
             lower.contains("mobile") -> RendererType.MOBILE
-            lower.contains("gl_compatibility") || lower.contains("compatibility") ||
-                    lower.contains("gles2") || lower.contains("gles3") -> RendererType.GL_COMPATIBILITY
+            lower == "gles3" -> RendererType.GLES3
+            lower == "gles2" -> RendererType.GLES2
+            lower.contains("gl_compatibility") || lower.contains("compatibility") -> RendererType.GL_COMPATIBILITY
             else -> RendererType.UNKNOWN
         }
     }

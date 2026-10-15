@@ -18,6 +18,8 @@ enum class RendererType(val displayName: String, val isMobileOptimized: Boolean)
     FORWARD_PLUS("Forward+ (Desktop / High-End Vulkan)", isMobileOptimized = false),
     MOBILE("Vulkan Mobile (Clustered Mobile)", isMobileOptimized = true),
     GL_COMPATIBILITY("OpenGL Compatibility (GLES3 / Broad Compatibility)", isMobileOptimized = true),
+    GLES3("GLES3 (OpenGL ES 3.0 / High Quality)", isMobileOptimized = true),
+    GLES2("GLES2 (OpenGL ES 2.0 / Legacy Compatibility)", isMobileOptimized = true),
     UNKNOWN("Default / Auto", isMobileOptimized = true)
 }
 

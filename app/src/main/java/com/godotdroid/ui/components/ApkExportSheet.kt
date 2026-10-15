@@ -97,7 +97,16 @@ fun ApkExportSheet(
 
     var appTitle by remember { mutableStateOf(game.report.gameTitle) }
     var packageName by remember { mutableStateOf("com.godotdroid.game.$sanitizedDefaultSlug") }
-    var selectedRenderer by remember { mutableStateOf(game.selectedRenderer) }
+    val isGodot3 = game.report.pckHeader.engineMajor == 3
+    var selectedRenderer by remember {
+        mutableStateOf(
+            if (isGodot3 && (game.selectedRenderer == RendererType.MOBILE || game.selectedRenderer == RendererType.UNKNOWN || game.selectedRenderer == RendererType.FORWARD_PLUS)) {
+                RendererType.GLES3
+            } else {
+                game.selectedRenderer
+            }
+        )
+    }
     var selectedPreset by remember { mutableStateOf(DefaultControlPresets.PRESET_PC_KEYBOARD) }
     var injectSteamStub by remember { mutableStateOf(game.report.hasGodotSteam) }
 
@@ -213,39 +222,64 @@ fun ApkExportSheet(
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    FilterChip(
-                        selected = selectedRenderer == RendererType.MOBILE,
-                        onClick = { selectedRenderer = RendererType.MOBILE },
-                        label = { Text("Vulkan Mobile", fontSize = 12.sp) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = GodotBlue,
-                            selectedLabelColor = Color.White,
-                            containerColor = SurfaceCardDark,
-                            labelColor = TextSecondaryDark
+                    if (isGodot3) {
+                        FilterChip(
+                            selected = selectedRenderer == RendererType.GLES3 || selectedRenderer == RendererType.MOBILE,
+                            onClick = { selectedRenderer = RendererType.GLES3 },
+                            label = { Text("GLES3 (High Quality)", fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = GodotBlue,
+                                selectedLabelColor = Color.White,
+                                containerColor = SurfaceCardDark,
+                                labelColor = TextSecondaryDark
+                            )
                         )
-                    )
-                    FilterChip(
-                        selected = selectedRenderer == RendererType.GL_COMPATIBILITY,
-                        onClick = { selectedRenderer = RendererType.GL_COMPATIBILITY },
-                        label = { Text("OpenGL Compatibility", fontSize = 12.sp) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = GodotBlue,
-                            selectedLabelColor = Color.White,
-                            containerColor = SurfaceCardDark,
-                            labelColor = TextSecondaryDark
+                        FilterChip(
+                            selected = selectedRenderer == RendererType.GLES2 || selectedRenderer == RendererType.GL_COMPATIBILITY,
+                            onClick = { selectedRenderer = RendererType.GLES2 },
+                            label = { Text("GLES2 (Maximum Compatibility)", fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = GodotBlue,
+                                selectedLabelColor = Color.White,
+                                containerColor = SurfaceCardDark,
+                                labelColor = TextSecondaryDark
+                            )
                         )
-                    )
-                    FilterChip(
-                        selected = selectedRenderer == RendererType.FORWARD_PLUS,
-                        onClick = { selectedRenderer = RendererType.FORWARD_PLUS },
-                        label = { Text("Forward+", fontSize = 12.sp) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = GodotBlue,
-                            selectedLabelColor = Color.White,
-                            containerColor = SurfaceCardDark,
-                            labelColor = TextSecondaryDark
+                    } else {
+                        FilterChip(
+                            selected = selectedRenderer == RendererType.MOBILE,
+                            onClick = { selectedRenderer = RendererType.MOBILE },
+                            label = { Text("Vulkan Mobile", fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = GodotBlue,
+                                selectedLabelColor = Color.White,
+                                containerColor = SurfaceCardDark,
+                                labelColor = TextSecondaryDark
+                            )
                         )
-                    )
+                        FilterChip(
+                            selected = selectedRenderer == RendererType.GL_COMPATIBILITY,
+                            onClick = { selectedRenderer = RendererType.GL_COMPATIBILITY },
+                            label = { Text("OpenGL 3 Compatibility", fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = GodotBlue,
+                                selectedLabelColor = Color.White,
+                                containerColor = SurfaceCardDark,
+                                labelColor = TextSecondaryDark
+                            )
+                        )
+                        FilterChip(
+                            selected = selectedRenderer == RendererType.FORWARD_PLUS,
+                            onClick = { selectedRenderer = RendererType.FORWARD_PLUS },
+                            label = { Text("Vulkan Forward+", fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = GodotBlue,
+                                selectedLabelColor = Color.White,
+                                containerColor = SurfaceCardDark,
+                                labelColor = TextSecondaryDark
+                            )
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))

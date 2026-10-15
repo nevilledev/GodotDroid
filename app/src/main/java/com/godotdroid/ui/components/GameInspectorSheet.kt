@@ -185,29 +185,45 @@ fun GameInspectorSheet(
             )
             Spacer(modifier = Modifier.height(8.dp))
 
+            val isGodot3 = game.report.pckHeader.engineMajor == 3
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                RendererOptionChip(
-                    renderer = RendererType.MOBILE,
-                    label = "Vulkan Mobile",
-                    isSelected = game.selectedRenderer == RendererType.MOBILE,
-                    onSelect = { onRendererSelected(RendererType.MOBILE) }
-                )
-                RendererOptionChip(
-                    renderer = RendererType.GL_COMPATIBILITY,
-                    label = "OpenGL Compatibility",
-                    isSelected = game.selectedRenderer == RendererType.GL_COMPATIBILITY,
-                    onSelect = { onRendererSelected(RendererType.GL_COMPATIBILITY) }
-                )
-                RendererOptionChip(
-                    renderer = RendererType.FORWARD_PLUS,
-                    label = "Forward+ (Desktop)",
-                    isSelected = game.selectedRenderer == RendererType.FORWARD_PLUS,
-                    onSelect = { onRendererSelected(RendererType.FORWARD_PLUS) }
-                )
+                if (isGodot3) {
+                    RendererOptionChip(
+                        renderer = RendererType.GLES3,
+                        label = "GLES3 (High Quality)",
+                        isSelected = game.selectedRenderer == RendererType.GLES3 || game.selectedRenderer == RendererType.MOBILE,
+                        onSelect = { onRendererSelected(RendererType.GLES3) }
+                    )
+                    RendererOptionChip(
+                        renderer = RendererType.GLES2,
+                        label = "GLES2 (Maximum Compatibility)",
+                        isSelected = game.selectedRenderer == RendererType.GLES2 || game.selectedRenderer == RendererType.GL_COMPATIBILITY,
+                        onSelect = { onRendererSelected(RendererType.GLES2) }
+                    )
+                } else {
+                    RendererOptionChip(
+                        renderer = RendererType.MOBILE,
+                        label = "Vulkan Mobile",
+                        isSelected = game.selectedRenderer == RendererType.MOBILE,
+                        onSelect = { onRendererSelected(RendererType.MOBILE) }
+                    )
+                    RendererOptionChip(
+                        renderer = RendererType.GL_COMPATIBILITY,
+                        label = "OpenGL 3 Compatibility",
+                        isSelected = game.selectedRenderer == RendererType.GL_COMPATIBILITY,
+                        onSelect = { onRendererSelected(RendererType.GL_COMPATIBILITY) }
+                    )
+                    RendererOptionChip(
+                        renderer = RendererType.FORWARD_PLUS,
+                        label = "Vulkan Forward+ (Desktop)",
+                        isSelected = game.selectedRenderer == RendererType.FORWARD_PLUS,
+                        onSelect = { onRendererSelected(RendererType.FORWARD_PLUS) }
+                    )
+                }
             }
 
             if (game.selectedRenderer == RendererType.FORWARD_PLUS) {
