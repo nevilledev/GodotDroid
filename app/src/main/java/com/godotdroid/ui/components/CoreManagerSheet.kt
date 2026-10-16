@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -38,8 +39,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -79,9 +82,13 @@ fun CoreManagerSheet(
     onImportTemplate: (Uri, String) -> Unit,
     onDownloadCore: (CoreDescriptor) -> Unit,
     onDeleteCore: (String) -> Unit,
+    currentRegistryUrl: String = "https://github.com/nevilledev/GodotDroid/releases/download/cores-latest",
+    isSyncing: Boolean = false,
+    onSyncRegistry: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var selectedImportVersionKey by remember { mutableStateOf("4.3") }
+    var registryUrlInput by remember(currentRegistryUrl) { mutableStateOf(currentRegistryUrl) }
 
     // SAF Picker for local export template (.apk, .tpz, .aar)
     val openTemplateLauncher = rememberLauncherForActivityResult(
@@ -292,7 +299,80 @@ fun CoreManagerSheet(
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.sp
             )
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Registry Source URL Config Card
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(SurfaceCardDark)
+                    .border(1.dp, SurfaceVariantDark, RoundedCornerShape(10.dp))
+                    .padding(12.dp)
+            ) {
+                Column {
+                    Text(
+                        text = "Registry Source URL (GitHub Releases / CDN)",
+                        color = TextSecondaryDark,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        OutlinedTextField(
+                            value = registryUrlInput,
+                            onValueChange = { registryUrlInput = it },
+                            singleLine = true,
+                            textStyle = androidx.compose.ui.text.TextStyle(
+                                color = TextPrimaryDark,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace
+                            ),
+                            colors = TextFieldDefaults.colors(
+                                focusedContainerColor = SurfaceVariantDark,
+                                unfocusedContainerColor = SurfaceVariantDark,
+                                focusedIndicatorColor = GodotBlue,
+                                unfocusedIndicatorColor = Color.Transparent
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(46.dp)
+                        )
+
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        Button(
+                            onClick = { onSyncRegistry(registryUrlInput) },
+                            enabled = !isSyncing && registryUrlInput.isNotBlank(),
+                            colors = ButtonDefaults.buttonColors(containerColor = GodotBlue),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.height(46.dp)
+                        ) {
+                            if (isSyncing) {
+                                CircularProgressIndicator(
+                                    color = Color.White,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.Sync,
+                                    contentDescription = "Sync",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Sync", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
 
             // Godot 4.x Cores
             val godot4Cores = registryCores.filter { it.versionKey.startsWith("4.") }

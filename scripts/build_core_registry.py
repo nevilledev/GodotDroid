@@ -192,7 +192,8 @@ def build_cores(
     local_dir: Optional[Path],
     enable_download: bool,
     repo: str,
-    tag: str
+    tag: str,
+    base_url: Optional[str] = None
 ) -> List[Dict]:
     """Processes all specified versions and outputs cores_manifest.json."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -202,6 +203,8 @@ def build_cores(
     print(f"  GodotDroid Core Registry Builder")
     print(f"  Target Versions: {len(versions)}")
     print(f"  Output Directory: {output_dir.resolve()}")
+    if base_url:
+        print(f"  Base URL: {base_url}")
     print(f"==================================================")
 
     for ver in versions:
@@ -268,7 +271,10 @@ def build_cores(
 
         # Add manifest entry
         display_name = f"Godot {version_key} {'(GLES3 / GLES2)' if major == 3 else 'Stable'}"
-        download_url = f"https://github.com/{repo}/releases/download/{tag}/{core_zip_name}"
+        if base_url:
+            download_url = f"{base_url.rstrip('/')}/{core_zip_name}"
+        else:
+            download_url = f"https://github.com/{repo}/releases/download/{tag}/{core_zip_name}"
 
         manifest_entries.append({
             "versionKey": version_key,
@@ -327,6 +333,18 @@ def main():
         help="Disable automatic downloads from official Godot repositories"
     )
     parser.add_argument(
+        "--download",
+        action="store_true",
+        default=False,
+        help="Explicitly enable automatic downloads from official Godot repositories"
+    )
+    parser.add_argument(
+        "--base-url",
+        type=str,
+        default=None,
+        help="Base URL prefix for core downloads in manifest (e.g. https://github.com/owner/repo/releases/download/cores-latest)"
+    )
+    parser.add_argument(
         "--repo",
         type=str,
         default="GodotDroid/GodotDroid",
@@ -341,13 +359,18 @@ def main():
 
     args = parser.parse_args()
 
+    enable_download = not args.no_download
+    if args.download:
+        enable_download = True
+
     build_cores(
         versions=args.versions,
         output_dir=args.output_dir,
         local_dir=args.local_tpz,
-        enable_download=not args.no_download,
+        enable_download=enable_download,
         repo=args.repo,
-        tag=args.tag
+        tag=args.tag,
+        base_url=args.base_url
     )
 
 if __name__ == "__main__":

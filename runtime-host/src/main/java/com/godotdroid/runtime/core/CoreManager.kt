@@ -24,6 +24,124 @@ import java.util.zip.ZipInputStream
 class CoreManager(private val context: Context) {
 
     private val coresDir = File(context.filesDir, "cores").apply { mkdirs() }
+    private val prefs = context.getSharedPreferences("godotdroid_core_prefs", Context.MODE_PRIVATE)
+    private val cachedManifestFile = File(coresDir, "remote_cores_manifest.json")
+
+    /**
+     * Gets the configured custom or default GitHub registry base URL.
+     */
+    fun getRegistryBaseUrl(): String {
+        return prefs.getString(PREF_REGISTRY_BASE_URL, DEFAULT_REGISTRY_BASE_URL) ?: DEFAULT_REGISTRY_BASE_URL
+    }
+
+    /**
+     * Updates the persistent custom GitHub registry base URL.
+     */
+    fun setRegistryBaseUrl(url: String) {
+        prefs.edit().putString(PREF_REGISTRY_BASE_URL, url.trim()).apply()
+    }
+
+    /**
+     * Returns the active catalog of Godot runtime cores, prioritizing synced remote manifest
+     * descriptors and falling back to built-in descriptors for any missing versions.
+     */
+    fun getRegistryCatalog(): List<CoreDescriptor> {
+        val remoteList = loadCachedManifest()
+        if (remoteList.isEmpty()) {
+            return builtInRegistry
+        }
+        val mergedMap = linkedMapOf<String, CoreDescriptor>()
+        for (descriptor in remoteList) {
+            mergedMap[descriptor.versionKey] = descriptor
+        }
+        for (descriptor in builtInRegistry) {
+            if (!mergedMap.containsKey(descriptor.versionKey)) {
+                mergedMap[descriptor.versionKey] = descriptor
+            }
+        }
+        return mergedMap.values.toList().sortedByDescending { it.versionKey }
+    }
+
+    /**
+     * Fetches the latest cores_manifest.json from the specified (or saved) registry base URL.
+     */
+    suspend fun fetchRemoteManifest(baseUrl: String = getRegistryBaseUrl()): Result<List<CoreDescriptor>> = withContext(Dispatchers.IO) {
+        try {
+            val manifestUrl = "${baseUrl.trimEnd('/')}/cores_manifest.json"
+            Log.i(TAG, "Fetching remote cores manifest from $manifestUrl")
+            val connection = (URL(manifestUrl).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 10000
+                readTimeout = 15000
+                requestMethod = "GET"
+                setRequestProperty("User-Agent", "GodotDroid/1.0")
+                instanceFollowRedirects = true
+            }
+
+            val responseCode = connection.responseCode
+            if (responseCode !in 200..299) {
+                connection.disconnect()
+                return@withContext Result.failure(Exception("HTTP error $responseCode fetching manifest from $manifestUrl"))
+            }
+
+            val jsonText = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            connection.disconnect()
+
+            val parsed = parseManifestJson(jsonText)
+            if (parsed.isNotEmpty()) {
+                cachedManifestFile.writeText(jsonText, Charsets.UTF_8)
+            }
+            Result.success(parsed)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to fetch remote cores manifest", e)
+            Result.failure(e)
+        }
+    }
+
+    private fun loadCachedManifest(): List<CoreDescriptor> {
+        if (!cachedManifestFile.exists()) return emptyList()
+        return try {
+            val text = cachedManifestFile.readText(Charsets.UTF_8)
+            parseManifestJson(text)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to read cached cores manifest", e)
+            emptyList()
+        }
+    }
+
+    private fun parseManifestJson(jsonText: String): List<CoreDescriptor> {
+        return try {
+            val array = JSONArray(jsonText)
+            val list = mutableListOf<CoreDescriptor>()
+            for (i in 0 until array.length()) {
+                val obj = array.getJSONObject(i)
+                val versionKey = obj.optString("versionKey", "")
+                if (versionKey.isBlank()) continue
+
+                val displayName = obj.optString("displayName", "Godot $versionKey")
+                val engineVersion = obj.optString("engineVersion", "$versionKey.0")
+                val downloadUrl = obj.optString("downloadUrl", "")
+                val sizeBytes = obj.optLong("sizeBytes", 35_000_000L)
+                val isRecommended = obj.optBoolean("isRecommended", false)
+                val sha256 = obj.optString("sha256", "")
+
+                list.add(
+                    CoreDescriptor(
+                        versionKey = versionKey,
+                        displayName = displayName,
+                        engineVersion = engineVersion,
+                        downloadUrl = downloadUrl,
+                        sizeBytes = sizeBytes,
+                        sha256 = sha256,
+                        isRecommended = isRecommended
+                    )
+                )
+            }
+            list
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to parse cores manifest JSON", e)
+            emptyList()
+        }
+    }
 
     /**
      * Default catalog of officially supported Godot Android runtime cores.
@@ -453,5 +571,7 @@ class CoreManager(private val context: Context) {
 
     companion object {
         private const val TAG = "CoreManager"
+        private const val PREF_REGISTRY_BASE_URL = "custom_registry_base_url"
+        const val DEFAULT_REGISTRY_BASE_URL = "https://github.com/nevilledev/GodotDroid/releases/download/cores-latest"
     }
 }

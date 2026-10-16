@@ -90,7 +90,8 @@ fun GameLibraryScreen(
     val installedCores by viewModel.installedCores.collectAsState()
     val isDownloadingCore by viewModel.isDownloadingCore.collectAsState()
     val downloadProgress by viewModel.downloadProgress.collectAsState()
-    val registryCores = viewModel.registryCores
+    val registryCores by viewModel.registryCores.collectAsState()
+    val isSyncingManifest by viewModel.isSyncingManifest.collectAsState()
 
     val snackbarHostState = remember { SnackbarHostState() }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -298,6 +299,11 @@ fun GameLibraryScreen(
                     },
                     onDeleteCore = { versionKey ->
                         viewModel.deleteCore(versionKey)
+                    },
+                    currentRegistryUrl = viewModel.getRegistryBaseUrl(),
+                    isSyncing = isSyncingManifest,
+                    onSyncRegistry = { url ->
+                        viewModel.syncRemoteRegistry(url)
                     }
                 )
             }

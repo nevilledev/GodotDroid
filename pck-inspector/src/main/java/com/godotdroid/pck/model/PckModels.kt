@@ -99,5 +99,6 @@ data class GodotGameReport(
     val plugins: List<PluginDependency>,
     val missingAndroidPlugins: List<PluginDependency>,
     val hasGodotSteam: Boolean,
-    val isEncrypted: Boolean
+    val isEncrypted: Boolean,
+    val candidateEncryptionKeys: List<String> = emptyList()
 )

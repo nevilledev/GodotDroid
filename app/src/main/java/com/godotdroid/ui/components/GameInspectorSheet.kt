@@ -2,6 +2,7 @@ package com.godotdroid.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,11 +20,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -35,8 +40,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import com.godotdroid.ui.theme.SuccessGreen
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -85,6 +95,10 @@ fun GameInspectorSheet(
     var injectSteamStub by remember(game.id) {
         mutableStateOf(game.report.hasGodotSteam)
     }
+    var enteredEncryptionKey by remember(game.id) {
+        mutableStateOf(game.report.candidateEncryptionKeys.firstOrNull() ?: "")
+    }
+    val clipboardManager = LocalClipboardManager.current
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -163,6 +177,172 @@ fun GameInspectorSheet(
                     val iconPath = game.report.iconPath
                     if (iconPath != null) {
                         DetailRow("App Icon Path", iconPath)
+                    }
+                }
+            }
+
+            // Encrypted PCK Key Inspector Card (when package is encrypted)
+            if (game.report.pckHeader.isEncrypted || game.report.isEncrypted) {
+                Spacer(modifier = Modifier.height(20.dp))
+
+                Text(
+                    text = "ENCRYPTED PCK KEY INSPECTOR (AES-256)",
+                    color = WarningAmber,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(SurfaceCardDark)
+                        .border(1.dp, WarningAmber.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                        .padding(14.dp)
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Lock,
+                                contentDescription = null,
+                                tint = WarningAmber,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Directory Encrypted (PACK_DIR_ENCRYPTED)",
+                                color = TextPrimaryDark,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Text(
+                            text = "This PCK package uses AES-256 encryption. The file directory requires a 256-bit (64 hex characters) key. GodotDroid has scanned the Windows PE .exe binary sections (.rdata/.data) for candidate script_encryption_key patterns.",
+                            color = TextSecondaryDark,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp
+                        )
+
+                        val candidates = game.report.candidateEncryptionKeys
+                        if (candidates.isNotEmpty()) {
+                            Text(
+                                text = "Detected PE Candidate Keys (${candidates.size}):",
+                                color = AccentCyan,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                candidates.forEachIndexed { index, candidateHex ->
+                                    val isSelected = enteredEncryptionKey.equals(candidateHex, ignoreCase = true)
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(if (isSelected) GodotBlue.copy(alpha = 0.2f) else SurfaceVariantDark)
+                                            .border(
+                                                1.dp,
+                                                if (isSelected) GodotBlue else Color.Transparent,
+                                                RoundedCornerShape(6.dp)
+                                            )
+                                            .clickable { enteredEncryptionKey = candidateHex }
+                                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                                    ) {
+                                        Text(
+                                            text = "#${index + 1}",
+                                            color = TextTertiaryDark,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.width(22.dp)
+                                        )
+
+                                        Text(
+                                            text = candidateHex,
+                                            color = if (isSelected) AccentCyan else TextPrimaryDark,
+                                            fontSize = 10.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            maxLines = 1,
+                                            modifier = Modifier.weight(1f)
+                                        )
+
+                                        IconButton(
+                                            onClick = {
+                                                clipboardManager.setText(AnnotatedString(candidateHex))
+                                                enteredEncryptionKey = candidateHex
+                                            },
+                                            modifier = Modifier.size(24.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.ContentCopy,
+                                                contentDescription = "Copy Key",
+                                                tint = TextSecondaryDark,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            Text(
+                                text = "No candidate AES-256 keys found automatically in PE sections. You can manually enter the 64-character hex key below.",
+                                color = TextTertiaryDark,
+                                fontSize = 11.sp
+                            )
+                        }
+
+                        // Custom Key Input
+                        val isValidKey = enteredEncryptionKey.length == 64 && enteredEncryptionKey.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
+
+                        OutlinedTextField(
+                            value = enteredEncryptionKey,
+                            onValueChange = { enteredEncryptionKey = it.trim() },
+                            label = { Text("AES-256 Hex Key (64 characters)", fontSize = 11.sp) },
+                            placeholder = { Text("e.g. 4a6f73657068206973206120676f646f...", fontSize = 11.sp) },
+                            singleLine = true,
+                            textStyle = androidx.compose.ui.text.TextStyle(
+                                color = TextPrimaryDark,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace
+                            ),
+                            trailingIcon = {
+                                if (isValidKey) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = "Valid Key",
+                                        tint = SuccessGreen,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            },
+                            colors = TextFieldDefaults.colors(
+                                focusedContainerColor = SurfaceVariantDark,
+                                unfocusedContainerColor = SurfaceVariantDark,
+                                focusedIndicatorColor = if (isValidKey) SuccessGreen else GodotBlue,
+                                unfocusedIndicatorColor = Color.Transparent
+                            ),
+                            supportingText = {
+                                Row(
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = if (isValidKey) "Valid 256-bit AES Key format" else "Format: 64 hexadecimal characters",
+                                        color = if (isValidKey) SuccessGreen else TextTertiaryDark,
+                                        fontSize = 10.sp
+                                    )
+                                    Text(
+                                        text = "${enteredEncryptionKey.length}/64",
+                                        color = if (enteredEncryptionKey.length == 64) SuccessGreen else TextTertiaryDark,
+                                        fontSize = 10.sp
+                                    )
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        )
                     }
                 }
             }

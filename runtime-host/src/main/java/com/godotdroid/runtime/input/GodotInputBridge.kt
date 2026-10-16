@@ -198,6 +198,86 @@ class GodotInputBridge(
         }
     }
 
+    /**
+     * Forwards physical hardware controller key events directly to the engine view and JNI.
+     */
+    fun dispatchHardwareKeyEvent(event: KeyEvent): Boolean {
+        val view = targetViewProvider()
+        if (view != null && view.dispatchKeyEvent(event)) {
+            return true
+        }
+
+        // GodotLib JNI Fallback for Gamepad Buttons
+        val godotBtn = mapAndroidKeyCodeToGodotJoyButton(event.keyCode)
+        if (godotBtn != -1) {
+            val isPressed = event.action == KeyEvent.ACTION_DOWN
+            resolveJniMethods()
+            try {
+                joyButtonMethod?.invoke(null, 0, godotBtn, isPressed)
+                return true
+            } catch (e: Exception) {
+                Log.w(TAG, "GodotLib.joybutton JNI fallback error: ${e.message}")
+            }
+        }
+        return false
+    }
+
+    /**
+     * Forwards physical hardware controller joystick/axis motion events to the engine view and JNI.
+     */
+    fun dispatchHardwareGenericMotionEvent(event: MotionEvent): Boolean {
+        val view = targetViewProvider()
+        if (view != null && view.dispatchGenericMotionEvent(event)) {
+            return true
+        }
+
+        // Direct JNI joyaxis fallback
+        resolveJniMethods()
+        if (joyAxisMethod != null) {
+            try {
+                val lx = event.getAxisValue(MotionEvent.AXIS_X)
+                val ly = event.getAxisValue(MotionEvent.AXIS_Y)
+                val rx = event.getAxisValue(MotionEvent.AXIS_Z)
+                val ry = event.getAxisValue(MotionEvent.AXIS_RZ)
+                val lt = event.getAxisValue(MotionEvent.AXIS_BRAKE).let { if (it > 0f) it else event.getAxisValue(MotionEvent.AXIS_LTRIGGER) }
+                val rt = event.getAxisValue(MotionEvent.AXIS_GAS).let { if (it > 0f) it else event.getAxisValue(MotionEvent.AXIS_RTRIGGER) }
+
+                joyAxisMethod?.invoke(null, 0, 0, lx)
+                joyAxisMethod?.invoke(null, 0, 1, ly)
+                joyAxisMethod?.invoke(null, 0, 2, rx)
+                joyAxisMethod?.invoke(null, 0, 3, ry)
+                if (lt > 0f) joyAxisMethod?.invoke(null, 0, 4, lt)
+                if (rt > 0f) joyAxisMethod?.invoke(null, 0, 5, rt)
+                return true
+            } catch (e: Exception) {
+                Log.w(TAG, "GodotLib.joyaxis JNI fallback error: ${e.message}")
+            }
+        }
+        return false
+    }
+
+    private fun mapAndroidKeyCodeToGodotJoyButton(keyCode: Int): Int {
+        return when (keyCode) {
+            KeyEvent.KEYCODE_BUTTON_A -> 0
+            KeyEvent.KEYCODE_BUTTON_B -> 1
+            KeyEvent.KEYCODE_BUTTON_X -> 2
+            KeyEvent.KEYCODE_BUTTON_Y -> 3
+            KeyEvent.KEYCODE_BUTTON_L1 -> 9
+            KeyEvent.KEYCODE_BUTTON_R1 -> 10
+            KeyEvent.KEYCODE_BUTTON_L2 -> 15
+            KeyEvent.KEYCODE_BUTTON_R2 -> 16
+            KeyEvent.KEYCODE_BUTTON_SELECT -> 4
+            KeyEvent.KEYCODE_BUTTON_START -> 6
+            KeyEvent.KEYCODE_BUTTON_THUMBL -> 7
+            KeyEvent.KEYCODE_BUTTON_THUMBR -> 8
+            KeyEvent.KEYCODE_DPAD_UP -> 11
+            KeyEvent.KEYCODE_DPAD_DOWN -> 12
+            KeyEvent.KEYCODE_DPAD_LEFT -> 13
+            KeyEvent.KEYCODE_DPAD_RIGHT -> 14
+            else -> -1
+        }
+    }
+
     private fun mapJoyButtonToAndroidKeyCode(buttonIndex: Int): Int {
         return when (buttonIndex) {
             0 -> KeyEvent.KEYCODE_BUTTON_A

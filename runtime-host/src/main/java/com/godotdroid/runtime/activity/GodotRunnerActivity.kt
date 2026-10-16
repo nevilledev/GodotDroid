@@ -19,12 +19,22 @@ import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import android.hardware.input.InputManager
+import android.view.InputDevice
+import android.view.KeyEvent
+import android.view.MotionEvent
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import com.godotdroid.overlay.model.DefaultControlPresets
 import com.godotdroid.pck.model.RendererType
 import com.godotdroid.runtime.core.CoreManager
 import com.godotdroid.runtime.input.GodotInputBridge
 import com.godotdroid.runtime.loader.DynamicGodotLoader
 import com.godotdroid.runtime.patcher.RuntimePatchInjector
+import com.godotdroid.runtime.profiler.PerformanceMonitor
 import com.godotdroid.runtime.ui.GodotRunnerOverlayScreen
 import java.io.File
 
@@ -44,6 +54,12 @@ class GodotRunnerActivity : ComponentActivity() {
     private var inputBridge: GodotInputBridge? = null
     private var composeOverlay: ComposeView? = null
     private var currentGameId: String = ""
+
+    private var performanceMonitor: PerformanceMonitor? = null
+    private var hasPhysicalGamepad by mutableStateOf(false)
+    private var isControllerActive by mutableStateOf(false)
+    private var inputManager: InputManager? = null
+    private var inputDeviceListener: InputManager.InputDeviceListener? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -73,6 +89,9 @@ class GodotRunnerActivity : ComponentActivity() {
         coreManager = CoreManager(this)
         patchInjector = RuntimePatchInjector(this)
         dynamicLoader = DynamicGodotLoader(this)
+
+        performanceMonitor = PerformanceMonitor().apply { start() }
+        setupInputDeviceListener()
 
         // 3. Extract Intent Arguments
         val gameId = intent.getStringExtra(EXTRA_GAME_ID) ?: ""
@@ -152,11 +171,17 @@ class GodotRunnerActivity : ComponentActivity() {
             val overlay = ComposeView(this).apply {
                 setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
                 setContent {
+                    val metrics by (performanceMonitor?.metrics?.collectAsState()
+                        ?: remember { mutableStateOf(PerformanceMonitor.PerformanceMetrics()) })
+
                     GodotRunnerOverlayScreen(
                         gameId = currentGameId,
                         initialPreset = controlPreset,
                         inputDispatcher = inputBridge,
-                        onExitGame = { finish() }
+                        onExitGame = { finish() },
+                        performanceMetrics = metrics,
+                        hasPhysicalGamepad = hasPhysicalGamepad,
+                        isControllerActive = isControllerActive
                     )
                 }
             }
@@ -252,7 +277,89 @@ class GodotRunnerActivity : ComponentActivity() {
         }
     }
 
+    private fun setupInputDeviceListener() {
+        val im = getSystemService(Context.INPUT_SERVICE) as? InputManager
+        inputManager = im
+        hasPhysicalGamepad = checkPhysicalGamepadConnected()
+
+        val listener = object : InputManager.InputDeviceListener {
+            override fun onInputDeviceAdded(deviceId: Int) {
+                hasPhysicalGamepad = checkPhysicalGamepadConnected()
+            }
+
+            override fun onInputDeviceRemoved(deviceId: Int) {
+                hasPhysicalGamepad = checkPhysicalGamepadConnected()
+            }
+
+            override fun onInputDeviceChanged(deviceId: Int) {
+                hasPhysicalGamepad = checkPhysicalGamepadConnected()
+            }
+        }
+        inputDeviceListener = listener
+        im?.registerInputDeviceListener(listener, null)
+    }
+
+    private fun checkPhysicalGamepadConnected(): Boolean {
+        return try {
+            val deviceIds = InputDevice.getDeviceIds()
+            for (id in deviceIds) {
+                val dev = InputDevice.getDevice(id) ?: continue
+                val sources = dev.sources
+                if ((sources and InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD ||
+                    (sources and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
+                ) {
+                    return true
+                }
+            }
+            false
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val isGamepadEvent = (event.source and InputDevice.SOURCE_GAMEPAD) != 0 ||
+                (event.source and InputDevice.SOURCE_JOYSTICK) != 0 ||
+                (event.keyCode in KeyEvent.KEYCODE_BUTTON_A..KeyEvent.KEYCODE_BUTTON_MODE) ||
+                (event.keyCode in KeyEvent.KEYCODE_DPAD_UP..KeyEvent.KEYCODE_DPAD_CENTER)
+
+        if (isGamepadEvent) {
+            isControllerActive = true
+            if (inputBridge?.dispatchHardwareKeyEvent(event) == true) {
+                return true
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        val isJoystick = (event.source and InputDevice.SOURCE_JOYSTICK) != 0 ||
+                (event.source and InputDevice.SOURCE_GAMEPAD) != 0
+
+        if (isJoystick) {
+            isControllerActive = true
+            if (inputBridge?.dispatchHardwareGenericMotionEvent(event) == true) {
+                return true
+            }
+        }
+        return super.dispatchGenericMotionEvent(event)
+    }
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        // Direct screen touch restores on-screen control visibility
+        if (event.action == MotionEvent.ACTION_DOWN) {
+            isControllerActive = false
+        }
+        return super.dispatchTouchEvent(event)
+    }
+
     override fun onDestroy() {
+        performanceMonitor?.stop()
+        performanceMonitor = null
+        inputDeviceListener?.let { inputManager?.unregisterInputDeviceListener(it) }
+        inputDeviceListener = null
+        inputManager = null
+
         engineInstance?.onDestroy()
         engineInstance = null
         inputBridge = null

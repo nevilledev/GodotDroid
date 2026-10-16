@@ -62,7 +62,11 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
     private val _downloadProgress = MutableStateFlow<DownloadProgress?>(null)
     val downloadProgress: StateFlow<DownloadProgress?> = _downloadProgress.asStateFlow()
 
-    val registryCores: List<CoreDescriptor> get() = coreManager.builtInRegistry
+    private val _registryCores = MutableStateFlow<List<CoreDescriptor>>(coreManager.getRegistryCatalog())
+    val registryCores: StateFlow<List<CoreDescriptor>> = _registryCores.asStateFlow()
+
+    private val _isSyncingManifest = MutableStateFlow(false)
+    val isSyncingManifest: StateFlow<Boolean> = _isSyncingManifest.asStateFlow()
 
     private val _uiEvents = MutableSharedFlow<UiEvent>()
     val uiEvents: SharedFlow<UiEvent> = _uiEvents.asSharedFlow()
@@ -70,6 +74,11 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
     init {
         loadGames()
         refreshCores()
+        refreshRegistryCatalog()
+    }
+
+    fun refreshRegistryCatalog() {
+        _registryCores.value = coreManager.getRegistryCatalog()
     }
 
     fun loadGames() {
@@ -256,6 +265,26 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 _uiEvents.emit(UiEvent.ShowMessage("Removed Godot $versionKey core"))
             } else {
                 _uiEvents.emit(UiEvent.ShowMessage("Failed to remove core"))
+            }
+        }
+    }
+
+    fun getRegistryBaseUrl(): String = coreManager.getRegistryBaseUrl()
+
+    fun syncRemoteRegistry(customUrl: String? = null) {
+        viewModelScope.launch {
+            _isSyncingManifest.value = true
+            if (!customUrl.isNullOrBlank()) {
+                coreManager.setRegistryBaseUrl(customUrl)
+            }
+            val result = coreManager.fetchRemoteManifest()
+            _isSyncingManifest.value = false
+
+            result.onSuccess { list ->
+                refreshRegistryCatalog()
+                _uiEvents.emit(UiEvent.ShowMessage("Registry synced: ${list.size} core(s) available"))
+            }.onFailure { error ->
+                _uiEvents.emit(UiEvent.ShowMessage("Manifest sync failed: ${error.message}"))
             }
         }
     }

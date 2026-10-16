@@ -40,6 +40,16 @@ class GameCompatibilityAnalyzer(
         val files = inspectResult.files
 
         if (inspectResult.isEncrypted) {
+            val candidateKeys = if (header.isEmbeddedExe) {
+                try {
+                    com.godotdroid.pck.inspector.PeEncryptionKeyScanner.scanForCandidateKeys(channel, channel.size())
+                } catch (_: Exception) {
+                    emptyList()
+                }
+            } else {
+                emptyList()
+            }
+
             return GodotGameReport(
                 gameTitle = fallbackTitle,
                 mainScene = null,
@@ -54,7 +64,8 @@ class GameCompatibilityAnalyzer(
                 plugins = emptyList(),
                 missingAndroidPlugins = emptyList(),
                 hasGodotSteam = false,
-                isEncrypted = true
+                isEncrypted = true,
+                candidateEncryptionKeys = candidateKeys
             )
         }
 

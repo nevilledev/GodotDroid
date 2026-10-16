@@ -1,0 +1,62 @@
+name: Release Godot Runtime Cores
+
+on:
+  workflow_dispatch:
+    inputs:
+      godot_versions:
+        description: 'Space-separated list of Godot versions to build and publish'
+        required: false
+        default: '4.4.1-stable 4.3-stable 4.2.2-stable 4.1.4-stable 4.0.4-stable 3.6-stable 3.5.3-stable'
+        type: string
+
+concurrency:
+  group: release-cores-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-publish:
+    name: Build and Publish Cores
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Build Core Archives and Manifest
+        run: |
+          python scripts/build_core_registry.py \
+            --versions ${{ inputs.godot_versions }} \
+            --download \
+            --output-dir ./dist_cores \
+            --base-url "https://github.com/${{ github.repository }}/releases/download/cores-latest"
+
+      - name: Verify Generated Cores
+        run: |
+          ls -lah ./dist_cores/
+          cat ./dist_cores/cores_manifest.json
+
+      - name: Publish Cores to GitHub Release (cores-latest)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: cores-latest
+          name: GodotDroid Runtime Cores (Latest)
+          body: |
+            ## GodotDroid Official Runtime Cores
+            Automated core release generated from official Godot export templates.
+            Compatible with Android 10–15 W^X execution policies.
+
+            ### Built Versions:
+            `${{ inputs.godot_versions }}`
+          draft: false
+          prerelease: false
+          files: |
+            ./dist_cores/*.zip
+            ./dist_cores/cores_manifest.json

@@ -18,11 +18,10 @@ object PeHeaderParser {
     )
 
     /**
-     * Attempts to find a section named ".pck" in a PE executable.
-     * Returns the pointer to raw data (file offset) if found, or null otherwise.
+     * Parses all section headers in a PE executable.
      */
-    fun findPckSectionOffset(channel: FileChannel, fileLength: Long): Long? {
-        if (fileLength < 0x40) return null
+    fun parseSections(channel: FileChannel, fileLength: Long): List<PeSection> {
+        if (fileLength < 0x40) return emptyList()
 
         val buffer = ByteBuffer.allocate(64).order(ByteOrder.LITTLE_ENDIAN)
 
@@ -30,24 +29,24 @@ object PeHeaderParser {
         channel.position(0x3C)
         buffer.clear()
         buffer.limit(4)
-        if (channel.read(buffer) < 4) return null
+        if (channel.read(buffer) < 4) return emptyList()
         buffer.flip()
         val peHeaderOffset = buffer.getInt().toLong() and 0xFFFFFFFFL
 
         if (peHeaderOffset <= 0 || peHeaderOffset + 24 > fileLength) {
-            return null
+            return emptyList()
         }
 
         // Verify PE signature at e_lfanew
         channel.position(peHeaderOffset)
         buffer.clear()
         buffer.limit(24) // 4 bytes signature + 20 bytes COFF header
-        if (channel.read(buffer) < 24) return null
+        if (channel.read(buffer) < 24) return emptyList()
         buffer.flip()
 
         val peSignature = buffer.getInt()
         if (peSignature != PckConstants.PE_SIGNATURE) {
-            return null
+            return emptyList()
         }
 
         // COFF header
@@ -60,9 +59,10 @@ object PeHeaderParser {
 
         val sectionTableOffset = peHeaderOffset + 24 + sizeOfOptionalHeader
         if (sectionTableOffset + (numberOfSections.toLong() * 40L) > fileLength) {
-            return null
+            return emptyList()
         }
 
+        val sections = mutableListOf<PeSection>()
         val sectionBuffer = ByteBuffer.allocate(40).order(ByteOrder.LITTLE_ENDIAN)
 
         for (i in 0 until numberOfSections) {
@@ -80,21 +80,40 @@ object PeHeaderParser {
             val sizeOfRawData = sectionBuffer.getInt().toLong() and 0xFFFFFFFFL
             val pointerToRawData = sectionBuffer.getInt().toLong() and 0xFFFFFFFFL
 
-            if (name.equals(".pck", ignoreCase = true)) {
-                // Verify magic at pointerToRawData
-                if (pointerToRawData + 4 <= fileLength) {
+            sections.add(
+                PeSection(
+                    name = name,
+                    virtualSize = virtualSize,
+                    virtualAddress = virtualAddress,
+                    sizeOfRawData = sizeOfRawData,
+                    pointerToRawData = pointerToRawData
+                )
+            )
+        }
+
+        return sections
+    }
+
+    /**
+     * Attempts to find a section named ".pck" in a PE executable.
+     * Returns the pointer to raw data (file offset) if found, or null otherwise.
+     */
+    fun findPckSectionOffset(channel: FileChannel, fileLength: Long): Long? {
+        val sections = parseSections(channel, fileLength)
+        for (sec in sections) {
+            if (sec.name.equals(".pck", ignoreCase = true)) {
+                if (sec.pointerToRawData + 4 <= fileLength) {
                     val magicBuf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
-                    channel.position(pointerToRawData)
+                    channel.position(sec.pointerToRawData)
                     if (channel.read(magicBuf) == 4) {
                         magicBuf.flip()
                         if (magicBuf.getInt() == PckConstants.PCK_MAGIC) {
-                            return pointerToRawData
+                            return sec.pointerToRawData
                         }
                     }
                 }
             }
         }
-
         return null
     }
 }
