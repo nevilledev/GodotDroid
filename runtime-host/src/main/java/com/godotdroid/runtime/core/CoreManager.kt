@@ -3,17 +3,23 @@ package com.godotdroid.runtime.core
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.IOException
 import java.io.InputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 
@@ -25,74 +31,111 @@ class CoreManager(private val context: Context) {
 
     private val coresDir = File(context.filesDir, "cores").apply { mkdirs() }
     private val prefs = context.getSharedPreferences("godotdroid_core_prefs", Context.MODE_PRIVATE)
-    private val cachedManifestFile = File(coresDir, "remote_cores_manifest.json")
+    private val cachedManifestFile = File(context.filesDir, "remote_cores_manifest.json")
+
+    private val httpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build()
+    }
+
+    private val _registryCatalog = MutableStateFlow<List<CoreDescriptor>>(loadInitialCatalog())
+    val registryCatalog: StateFlow<List<CoreDescriptor>> = _registryCatalog.asStateFlow()
 
     /**
-     * Gets the configured custom or default GitHub registry base URL.
+     * Gets the configured custom or default GitHub registry base URL, sanitized.
      */
     fun getRegistryBaseUrl(): String {
-        return prefs.getString(PREF_REGISTRY_BASE_URL, DEFAULT_REGISTRY_BASE_URL) ?: DEFAULT_REGISTRY_BASE_URL
+        val raw = prefs.getString(PREF_REGISTRY_BASE_URL, DEFAULT_REGISTRY_BASE_URL) ?: DEFAULT_REGISTRY_BASE_URL
+        val sanitized = sanitizeRegistryBaseUrl(raw)
+        if (sanitized != raw) {
+            prefs.edit().putString(PREF_REGISTRY_BASE_URL, sanitized).apply()
+        }
+        return sanitized
     }
 
     /**
-     * Updates the persistent custom GitHub registry base URL.
+     * Updates the persistent custom GitHub registry base URL after sanitizing.
      */
     fun setRegistryBaseUrl(url: String) {
-        prefs.edit().putString(PREF_REGISTRY_BASE_URL, url.trim()).apply()
+        val sanitized = sanitizeRegistryBaseUrl(url)
+        prefs.edit().putString(PREF_REGISTRY_BASE_URL, sanitized).apply()
     }
 
     /**
-     * Returns the active catalog of Godot runtime cores, prioritizing synced remote manifest
-     * descriptors and falling back to built-in descriptors for any missing versions.
+     * Returns the active catalog of Godot runtime cores.
      */
     fun getRegistryCatalog(): List<CoreDescriptor> {
-        val remoteList = loadCachedManifest()
-        if (remoteList.isEmpty()) {
-            return builtInRegistry
-        }
-        val mergedMap = linkedMapOf<String, CoreDescriptor>()
-        for (descriptor in remoteList) {
-            mergedMap[descriptor.versionKey] = descriptor
-        }
-        for (descriptor in builtInRegistry) {
-            if (!mergedMap.containsKey(descriptor.versionKey)) {
-                mergedMap[descriptor.versionKey] = descriptor
-            }
-        }
-        return mergedMap.values.toList().sortedByDescending { it.versionKey }
+        return _registryCatalog.value
     }
 
     /**
-     * Fetches the latest cores_manifest.json from the specified (or saved) registry base URL.
+     * Loads initial catalog: cached remote manifest if available, otherwise builtInRegistry.
+     */
+    private fun loadInitialCatalog(): List<CoreDescriptor> {
+        val cached = loadCachedManifest()
+        return if (cached.isNotEmpty()) {
+            cached
+        } else {
+            builtInRegistry
+        }
+    }
+
+    /**
+     * Syncs remote manifest, updating the reactive StateFlow catalog.
+     */
+    suspend fun syncRemoteManifest(baseUrl: String = getRegistryBaseUrl()): Result<List<CoreDescriptor>> =
+        fetchRemoteManifest(baseUrl)
+
+    /**
+     * Fetches the latest cores_manifest.json from the specified registry base URL.
      */
     suspend fun fetchRemoteManifest(baseUrl: String = getRegistryBaseUrl()): Result<List<CoreDescriptor>> = withContext(Dispatchers.IO) {
+        val sanitizedBase = sanitizeRegistryBaseUrl(baseUrl)
+        val manifestUrl = "$sanitizedBase/cores_manifest.json"
+        Log.i(TAG, "Fetching remote cores manifest from $manifestUrl")
+
         try {
-            val manifestUrl = "${baseUrl.trimEnd('/')}/cores_manifest.json"
-            Log.i(TAG, "Fetching remote cores manifest from $manifestUrl")
-            val connection = (URL(manifestUrl).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 10000
-                readTimeout = 15000
-                requestMethod = "GET"
-                setRequestProperty("User-Agent", "GodotDroid/1.0")
-                instanceFollowRedirects = true
+            val request = Request.Builder()
+                .url(manifestUrl)
+                .header("User-Agent", "GodotDroid/1.0")
+                .build()
+
+            val response = httpClient.newCall(request).execute()
+            val statusCode = response.code
+            val finalUrl = response.request.url.toString()
+            Log.i(TAG, "Manifest fetch HTTP status $statusCode, final URL: $finalUrl")
+
+            if (!response.isSuccessful) {
+                val err = "HTTP error $statusCode fetching manifest from $manifestUrl"
+                Log.e(TAG, err)
+                return@withContext Result.failure(IOException(err))
             }
 
-            val responseCode = connection.responseCode
-            if (responseCode !in 200..299) {
-                connection.disconnect()
-                return@withContext Result.failure(Exception("HTTP error $responseCode fetching manifest from $manifestUrl"))
+            val body = response.body ?: throw IOException("Empty response body from $manifestUrl")
+            val jsonText = body.string()
+
+            val parsed = parseManifestJson(jsonText, sanitizedBase)
+            if (parsed.isEmpty()) {
+                val err = "No valid core entries found in manifest from $manifestUrl"
+                Log.e(TAG, err)
+                return@withContext Result.failure(IllegalStateException(err))
             }
 
-            val jsonText = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            connection.disconnect()
-
-            val parsed = parseManifestJson(jsonText)
-            if (parsed.isNotEmpty()) {
+            try {
                 cachedManifestFile.writeText(jsonText, Charsets.UTF_8)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to cache manifest file to ${cachedManifestFile.absolutePath}", e)
             }
+
+            _registryCatalog.value = parsed
+            Log.i(TAG, "Manifest parsed: ${parsed.size} core(s) loaded")
             Result.success(parsed)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to fetch remote cores manifest", e)
+            Log.e(TAG, "Failed to fetch remote cores manifest from $manifestUrl", e)
             Result.failure(e)
         }
     }
@@ -101,46 +144,18 @@ class CoreManager(private val context: Context) {
         if (!cachedManifestFile.exists()) return emptyList()
         return try {
             val text = cachedManifestFile.readText(Charsets.UTF_8)
-            parseManifestJson(text)
+            parseManifestJson(text, getRegistryBaseUrl())
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to read cached cores manifest", e)
+            Log.e(TAG, "Failed to read cached cores manifest", e)
             emptyList()
         }
     }
 
-    private fun parseManifestJson(jsonText: String): List<CoreDescriptor> {
-        return try {
-            val array = JSONArray(jsonText)
-            val list = mutableListOf<CoreDescriptor>()
-            for (i in 0 until array.length()) {
-                val obj = array.getJSONObject(i)
-                val versionKey = obj.optString("versionKey", "")
-                if (versionKey.isBlank()) continue
-
-                val displayName = obj.optString("displayName", "Godot $versionKey")
-                val engineVersion = obj.optString("engineVersion", "$versionKey.0")
-                val downloadUrl = obj.optString("downloadUrl", "")
-                val sizeBytes = obj.optLong("sizeBytes", 35_000_000L)
-                val isRecommended = obj.optBoolean("isRecommended", false)
-                val sha256 = obj.optString("sha256", "")
-
-                list.add(
-                    CoreDescriptor(
-                        versionKey = versionKey,
-                        displayName = displayName,
-                        engineVersion = engineVersion,
-                        downloadUrl = downloadUrl,
-                        sizeBytes = sizeBytes,
-                        sha256 = sha256,
-                        isRecommended = isRecommended
-                    )
-                )
-            }
-            list
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to parse cores manifest JSON", e)
-            emptyList()
-        }
+    /**
+     * Parses manifest JSON supporting both top-level JSONArray and JSONObject {"cores": [...]}.
+     */
+    fun parseManifestJson(jsonText: String, baseUrl: String = getRegistryBaseUrl()): List<CoreDescriptor> {
+        return Companion.parseManifestJson(jsonText, baseUrl)
     }
 
     /**
@@ -354,6 +369,7 @@ class CoreManager(private val context: Context) {
         versionKey: String,
         engineVersion: String = "$versionKey.0",
         sourceName: String = "local_template",
+        sourceType: String = "LOCAL_TEMPLATE",
         onProgress: ((DownloadProgress) -> Unit)? = null
     ): Result<InstalledCore> = withContext(Dispatchers.IO) {
         try {
@@ -459,7 +475,7 @@ class CoreManager(private val context: Context) {
             val manifest = JSONObject().apply {
                 put("versionKey", versionKey)
                 put("engineVersion", engineVersion)
-                put("sourceType", "LOCAL_TEMPLATE")
+                put("sourceType", sourceType)
                 put("sourceName", sourceName)
                 put("installedTimestamp", System.currentTimeMillis())
                 put("sha256", sha256)
@@ -469,13 +485,15 @@ class CoreManager(private val context: Context) {
 
             onProgress?.invoke(DownloadProgress(100, 100, 100, "Core installed successfully!"))
 
+            Log.i(TAG, "Install success: Godot $versionKey ($engineVersion, $sourceType) installed at ${targetDir.absolutePath}")
+
             val installedCore = InstalledCore(
                 versionKey = versionKey,
                 engineVersion = engineVersion,
                 coreDir = targetDir,
                 soFile = targetSo,
                 dexFile = targetDex,
-                sourceType = "LOCAL_TEMPLATE",
+                sourceType = sourceType,
                 installedTimestamp = System.currentTimeMillis(),
                 sha256 = sha256
             )
@@ -493,33 +511,94 @@ class CoreManager(private val context: Context) {
         descriptor: CoreDescriptor,
         onProgress: ((DownloadProgress) -> Unit)? = null
     ): Result<InstalledCore> = withContext(Dispatchers.IO) {
-        try {
-            onProgress?.invoke(DownloadProgress(0, 100, 0, "Connecting to ${descriptor.displayName}..."))
+        val fixedUrl = descriptor.downloadUrl.replace("nevilledroid", "nevilledev", ignoreCase = true)
+        Log.i(TAG, "Get tapped: versionKey=${descriptor.versionKey}, url=$fixedUrl")
+        onProgress?.invoke(DownloadProgress(0, 100, 0, "Connecting to ${descriptor.displayName}..."))
 
-            val url = URL(descriptor.downloadUrl)
-            val connection = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 15000
-                readTimeout = 30000
-                instanceFollowRedirects = true
+        val tempFile = File(context.cacheDir, "core_download_${descriptor.versionKey}_${System.currentTimeMillis()}.tmp")
+
+        try {
+            val request = Request.Builder()
+                .url(fixedUrl)
+                .header("User-Agent", "GodotDroid/1.0")
+                .build()
+
+            val response = httpClient.newCall(request).execute()
+            val statusCode = response.code
+            val finalUrl = response.request.url.toString()
+            Log.i(TAG, "HTTP status $statusCode, final URL: $finalUrl")
+
+            if (!response.isSuccessful) {
+                val err = "Download failed with HTTP $statusCode from $fixedUrl"
+                Log.e(TAG, err)
+                return@withContext Result.failure(IOException(err))
             }
 
-            val totalBytes = connection.contentLengthLong.let { if (it > 0) it else descriptor.sizeBytes }
-            val input = connection.inputStream
+            val body = response.body ?: throw IOException("Empty response body from $fixedUrl")
+            val totalBytes = if (body.contentLength() > 0) body.contentLength() else descriptor.sizeBytes
 
-            onProgress?.invoke(DownloadProgress(0, totalBytes, 10, "Downloading core archive..."))
+            body.byteStream().use { input ->
+                FileOutputStream(tempFile).use { output ->
+                    val buffer = ByteArray(32768)
+                    var read: Int
+                    var bytesDownloaded = 0L
+                    var lastReport = 0L
+                    while (input.read(buffer).also { read = it } != -1) {
+                        output.write(buffer, 0, read)
+                        bytesDownloaded += read
+                        val now = System.currentTimeMillis()
+                        if (now - lastReport > 80 || bytesDownloaded == totalBytes) {
+                            lastReport = now
+                            val percent = if (totalBytes > 0) ((bytesDownloaded * 100) / totalBytes).toInt().coerceIn(0, 95) else 50
+                            val mb = bytesDownloaded / (1024 * 1024)
+                            val totalMb = totalBytes / (1024 * 1024)
+                            onProgress?.invoke(DownloadProgress(bytesDownloaded, totalBytes, percent, "Downloading: $mb / $totalMb MB ($percent%)"))
+                        }
+                    }
+                    output.flush()
+                }
+            }
 
-            // Stream download and extract
-            val result = importCoreFromTemplate(
-                inputStream = input,
-                versionKey = descriptor.versionKey,
-                engineVersion = descriptor.engineVersion,
-                sourceName = "REMOTE_REGISTRY",
-                onProgress = onProgress
-            )
+            // Verify SHA-256
+            onProgress?.invoke(DownloadProgress(totalBytes, totalBytes, 96, "Verifying SHA-256 checksum..."))
+            val calculatedSha256 = calculateSha256(tempFile)
+            if (descriptor.sha256.isNotBlank()) {
+                if (!calculatedSha256.equals(descriptor.sha256.trim(), ignoreCase = true)) {
+                    Log.e(TAG, "SHA-256 fail: Expected ${descriptor.sha256}, Got $calculatedSha256")
+                    tempFile.delete()
+                    return@withContext Result.failure(
+                        SecurityException("SHA-256 verification failed for ${descriptor.displayName}. Expected: ${descriptor.sha256}, calculated: $calculatedSha256")
+                    )
+                }
+                Log.i(TAG, "SHA-256 pass: $calculatedSha256")
+            } else {
+                Log.i(TAG, "SHA-256 pass: (no checksum in manifest, computed $calculatedSha256)")
+            }
 
-            connection.disconnect()
-            result
+            // Extract and install
+            onProgress?.invoke(DownloadProgress(totalBytes, totalBytes, 98, "Installing Godot ${descriptor.versionKey} core..."))
+            val installResult = FileInputStream(tempFile).use { stream ->
+                importCoreFromTemplate(
+                    inputStream = stream,
+                    versionKey = descriptor.versionKey,
+                    engineVersion = descriptor.engineVersion,
+                    sourceName = fixedUrl,
+                    sourceType = "REMOTE_REGISTRY",
+                    onProgress = onProgress
+                )
+            }
+
+            tempFile.delete()
+
+            installResult.onSuccess { core ->
+                Log.i(TAG, "Install success: Godot ${core.versionKey} (${core.engineVersion}) installed at ${core.coreDir.absolutePath}")
+            }.onFailure { e ->
+                Log.e(TAG, "Install failed for Godot ${descriptor.versionKey}", e)
+            }
+
+            installResult
         } catch (e: Exception) {
+            tempFile.delete()
             Log.e(TAG, "Failed to download core ${descriptor.versionKey}", e)
             Result.failure(e)
         }
@@ -539,18 +618,30 @@ class CoreManager(private val context: Context) {
 
     private fun isArm64So(path: String): Boolean {
         val lower = path.lowercase()
-        return lower.endsWith(".so") && (lower.contains("arm64") || lower.contains("aarch64"))
+        if (!lower.endsWith(".so")) return false
+        if (lower.contains('/')) {
+            return lower.contains("arm64") || lower.contains("aarch64")
+        }
+        return true
     }
 
     private fun isArm64LibGodot(path: String): Boolean {
         val lower = path.lowercase()
-        return (lower.endsWith("libgodot_android.so") || lower.endsWith("libgodot_android.arm64.so")) &&
-                (lower.contains("arm64") || lower.contains("aarch64"))
+        val fileName = lower.substringAfterLast('/')
+        val isGodot = fileName == "libgodot_android.so" ||
+                fileName == "libgodot_android.arm64.so" ||
+                fileName.startsWith("libgodot_android")
+        if (!isGodot) return false
+        if (lower.contains('/')) {
+            return lower.contains("arm64") || lower.contains("aarch64")
+        }
+        return true
     }
 
     private fun isClassesDex(path: String): Boolean {
         val lower = path.lowercase()
-        return lower.endsWith("classes.dex") || lower.endsWith("godot-lib.dex")
+        val fileName = lower.substringAfterLast('/')
+        return fileName == "classes.dex" || fileName == "godot-lib.dex"
     }
 
     private fun calculateSha256(file: File): String {
@@ -564,7 +655,8 @@ class CoreManager(private val context: Context) {
                 }
             }
             md.digest().joinToString("") { "%02x".format(it) }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to calculate SHA-256", e)
             ""
         }
     }
@@ -573,5 +665,85 @@ class CoreManager(private val context: Context) {
         private const val TAG = "CoreManager"
         private const val PREF_REGISTRY_BASE_URL = "custom_registry_base_url"
         const val DEFAULT_REGISTRY_BASE_URL = "https://github.com/nevilledev/GodotDroid/releases/download/cores-latest"
+
+        /**
+         * Sanitizes registry base URL: trims whitespace, replaces typo 'nevilledroid' with 'nevilledev',
+         * removes trailing slashes, and strips any trailing '/cores_manifest.json' or '.zip' filename.
+         */
+        fun sanitizeRegistryBaseUrl(url: String): String {
+            var sanitized = url.trim()
+                .replace("nevilledroid", "nevilledev", ignoreCase = true)
+                .trimEnd('/')
+
+            if (sanitized.endsWith("/cores_manifest.json", ignoreCase = true)) {
+                sanitized = sanitized.substring(0, sanitized.length - "/cores_manifest.json".length)
+            } else if (sanitized.endsWith("cores_manifest.json", ignoreCase = true)) {
+                sanitized = sanitized.substring(0, sanitized.length - "cores_manifest.json".length)
+            }
+
+            val zipRegex = Regex("/[^/]+\\.zip$", RegexOption.IGNORE_CASE)
+            sanitized = sanitized.replace(zipRegex, "")
+            sanitized = sanitized.trimEnd('/')
+
+            return if (sanitized.isBlank()) DEFAULT_REGISTRY_BASE_URL else sanitized
+        }
+
+        /**
+         * Parses manifest JSON supporting both top-level JSONArray and JSONObject {"cores": [...]}.
+         */
+        fun parseManifestJson(jsonText: String, baseUrl: String = DEFAULT_REGISTRY_BASE_URL): List<CoreDescriptor> {
+            return try {
+                val sanitizedBaseUrl = sanitizeRegistryBaseUrl(baseUrl)
+                val trimmed = jsonText.trim()
+                val array: JSONArray = when {
+                    trimmed.startsWith("[") -> JSONArray(trimmed)
+                    trimmed.startsWith("{") -> {
+                        val obj = JSONObject(trimmed)
+                        obj.optJSONArray("cores") ?: obj.optJSONArray("manifest") ?: JSONArray()
+                    }
+                    else -> {
+                        Log.e(TAG, "Manifest JSON format unrecognized: ${trimmed.take(60)}")
+                        return emptyList()
+                    }
+                }
+
+                val list = mutableListOf<CoreDescriptor>()
+                for (i in 0 until array.length()) {
+                    val obj = array.getJSONObject(i)
+                    val versionKey = obj.optString("versionKey", "")
+                    if (versionKey.isBlank()) continue
+
+                    val displayName = obj.optString("displayName", "Godot $versionKey")
+                    val engineVersion = obj.optString("engineVersion", "$versionKey.0")
+                    val rawDownloadUrl = obj.optString("downloadUrl", "")
+                    val fileName = obj.optString("fileName", "core_$versionKey.zip")
+                    val sizeBytes = obj.optLong("sizeBytes", 0L)
+                    val isRecommended = obj.optBoolean("isRecommended", false)
+                    val sha256 = obj.optString("sha256", "")
+
+                    // Fix downloadUrl: replace typo nevilledroid with nevilledev or construct from $sanitizedBaseUrl/$fileName
+                    val fixedDownloadUrl = when {
+                        rawDownloadUrl.isNotBlank() -> rawDownloadUrl.replace("nevilledroid", "nevilledev", ignoreCase = true)
+                        else -> "$sanitizedBaseUrl/$fileName"
+                    }
+
+                    list.add(
+                        CoreDescriptor(
+                            versionKey = versionKey,
+                            displayName = displayName,
+                            engineVersion = engineVersion,
+                            downloadUrl = fixedDownloadUrl,
+                            sizeBytes = sizeBytes,
+                            sha256 = sha256,
+                            isRecommended = isRecommended
+                        )
+                    )
+                }
+                list
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to parse cores manifest JSON", e)
+                emptyList()
+            }
+        }
     }
 }

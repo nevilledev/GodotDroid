@@ -62,11 +62,13 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
     private val _downloadProgress = MutableStateFlow<DownloadProgress?>(null)
     val downloadProgress: StateFlow<DownloadProgress?> = _downloadProgress.asStateFlow()
 
-    private val _registryCores = MutableStateFlow<List<CoreDescriptor>>(coreManager.getRegistryCatalog())
-    val registryCores: StateFlow<List<CoreDescriptor>> = _registryCores.asStateFlow()
+    val registryCores: StateFlow<List<CoreDescriptor>> = coreManager.registryCatalog
 
     private val _isSyncingManifest = MutableStateFlow(false)
     val isSyncingManifest: StateFlow<Boolean> = _isSyncingManifest.asStateFlow()
+
+    private val _coreErrorMessage = MutableStateFlow<String?>(null)
+    val coreErrorMessage: StateFlow<String?> = _coreErrorMessage.asStateFlow()
 
     private val _uiEvents = MutableSharedFlow<UiEvent>()
     val uiEvents: SharedFlow<UiEvent> = _uiEvents.asSharedFlow()
@@ -74,11 +76,14 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
     init {
         loadGames()
         refreshCores()
-        refreshRegistryCatalog()
+    }
+
+    fun clearCoreError() {
+        _coreErrorMessage.value = null
     }
 
     fun refreshRegistryCatalog() {
-        _registryCores.value = coreManager.getRegistryCatalog()
+        // Automatically reactive via coreManager.registryCatalog
     }
 
     fun loadGames() {
@@ -206,11 +211,14 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
     fun importCoreFromTemplate(uri: Uri, versionKey: String) {
         viewModelScope.launch {
             _isDownloadingCore.value = true
+            _coreErrorMessage.value = null
             try {
                 val context = getApplication<Application>().applicationContext
                 val input = context.contentResolver.openInputStream(uri)
                 if (input == null) {
-                    _uiEvents.emit(UiEvent.ShowMessage("Could not open template file"))
+                    val msg = "Could not open template file"
+                    _coreErrorMessage.value = msg
+                    _uiEvents.emit(UiEvent.ShowMessage(msg))
                     _isDownloadingCore.value = false
                     return@launch
                 }
@@ -228,12 +236,16 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     refreshCores()
                     _uiEvents.emit(UiEvent.ShowMessage("Successfully imported Godot ${core.versionKey} core!"))
                 }.onFailure { error ->
-                    _uiEvents.emit(UiEvent.ShowMessage("Failed to import core: ${error.message}"))
+                    val msg = "Failed to import core: ${error.message}"
+                    _coreErrorMessage.value = msg
+                    _uiEvents.emit(UiEvent.ShowMessage(msg))
                 }
             } catch (e: Exception) {
                 _isDownloadingCore.value = false
                 _downloadProgress.value = null
-                _uiEvents.emit(UiEvent.ShowMessage("Error importing template: ${e.message}"))
+                val msg = "Error importing template: ${e.message}"
+                _coreErrorMessage.value = msg
+                _uiEvents.emit(UiEvent.ShowMessage(msg))
             }
         }
     }
@@ -241,6 +253,7 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
     fun downloadCore(descriptor: CoreDescriptor) {
         viewModelScope.launch {
             _isDownloadingCore.value = true
+            _coreErrorMessage.value = null
             val result = coreManager.downloadCore(
                 descriptor = descriptor,
                 onProgress = { progress -> _downloadProgress.value = progress }
@@ -252,7 +265,9 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 refreshCores()
                 _uiEvents.emit(UiEvent.ShowMessage("Installed ${descriptor.displayName}!"))
             }.onFailure { error ->
-                _uiEvents.emit(UiEvent.ShowMessage("Failed to download core: ${error.message}"))
+                val msg = "Failed to download core: ${error.message}"
+                _coreErrorMessage.value = msg
+                _uiEvents.emit(UiEvent.ShowMessage(msg))
             }
         }
     }
@@ -274,17 +289,19 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
     fun syncRemoteRegistry(customUrl: String? = null) {
         viewModelScope.launch {
             _isSyncingManifest.value = true
+            _coreErrorMessage.value = null
             if (!customUrl.isNullOrBlank()) {
                 coreManager.setRegistryBaseUrl(customUrl)
             }
-            val result = coreManager.fetchRemoteManifest()
+            val result = coreManager.syncRemoteManifest()
             _isSyncingManifest.value = false
 
             result.onSuccess { list ->
-                refreshRegistryCatalog()
                 _uiEvents.emit(UiEvent.ShowMessage("Registry synced: ${list.size} core(s) available"))
             }.onFailure { error ->
-                _uiEvents.emit(UiEvent.ShowMessage("Manifest sync failed: ${error.message}"))
+                val msg = "Manifest sync failed: ${error.message}"
+                _coreErrorMessage.value = msg
+                _uiEvents.emit(UiEvent.ShowMessage(msg))
             }
         }
     }

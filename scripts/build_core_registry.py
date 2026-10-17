@@ -347,7 +347,7 @@ def main():
     parser.add_argument(
         "--repo",
         type=str,
-        default="GodotDroid/GodotDroid",
+        default="nevilledev/GodotDroid",
         help="GitHub repository path for download URLs (owner/repo)"
     )
     parser.add_argument(

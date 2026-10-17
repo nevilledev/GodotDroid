@@ -92,6 +92,7 @@ fun GameLibraryScreen(
     val downloadProgress by viewModel.downloadProgress.collectAsState()
     val registryCores by viewModel.registryCores.collectAsState()
     val isSyncingManifest by viewModel.isSyncingManifest.collectAsState()
+    val coreErrorMessage by viewModel.coreErrorMessage.collectAsState()
 
     val snackbarHostState = remember { SnackbarHostState() }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -304,7 +305,9 @@ fun GameLibraryScreen(
                     isSyncing = isSyncingManifest,
                     onSyncRegistry = { url ->
                         viewModel.syncRemoteRegistry(url)
-                    }
+                    },
+                    errorMessage = coreErrorMessage,
+                    onClearError = { viewModel.clearCoreError() }
                 )
             }
 

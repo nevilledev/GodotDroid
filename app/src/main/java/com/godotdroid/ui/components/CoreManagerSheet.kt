@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -85,6 +86,8 @@ fun CoreManagerSheet(
     currentRegistryUrl: String = "https://github.com/nevilledev/GodotDroid/releases/download/cores-latest",
     isSyncing: Boolean = false,
     onSyncRegistry: (String) -> Unit = {},
+    errorMessage: String? = null,
+    onClearError: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var selectedImportVersionKey by remember { mutableStateOf("4.3") }
@@ -139,6 +142,49 @@ fun CoreManagerSheet(
             Spacer(modifier = Modifier.height(16.dp))
             HorizontalDivider(color = SurfaceVariantDark)
             Spacer(modifier = Modifier.height(16.dp))
+
+            // Error Banner
+            if (!errorMessage.isNullOrBlank()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(ErrorRed.copy(alpha = 0.15f))
+                        .border(1.dp, ErrorRed.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
+                        .padding(12.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "Error",
+                            tint = ErrorRed,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = errorMessage,
+                            color = TextPrimaryDark,
+                            fontSize = 12.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(
+                            onClick = onClearError,
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Dismiss",
+                                tint = TextSecondaryDark,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(14.dp))
+            }
 
             // Active Download Progress
             if (isDownloading && downloadProgress != null) {
@@ -535,6 +581,13 @@ private fun RegistryCoreCard(
                     color = SuccessGreen,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold
+                )
+            } else if (descriptor.downloadUrl.isBlank()) {
+                Text(
+                    text = "Not in registry",
+                    color = TextTertiaryDark,
+                    fontSize = 11.sp,
+                    fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
                 )
             } else {
                 Button(
