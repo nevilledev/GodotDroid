@@ -286,8 +286,8 @@ fun GameLibraryScreen(
             // Core Manager Sheet
             if (showCoreManagerSheet) {
                 CoreManagerSheet(
-                    installedCores = installedCores,
-                    registryCores = registryCores,
+                    installedCores = installedCores ?: emptyList(),
+                    registryCores = registryCores ?: emptyList(),
                     downloadProgress = downloadProgress,
                     isDownloading = isDownloadingCore,
                     sheetState = coreSheetState,
@@ -328,6 +328,7 @@ fun GameLibraryScreen(
                     },
                     confirmButton = {
                         TextButton(onClick = {
+                            viewModel.selectGame(null)
                             promptInstallData = null
                             showCoreManagerSheet = true
                         }) {

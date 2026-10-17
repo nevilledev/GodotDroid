@@ -69,13 +69,14 @@ class CoreManagerTest {
 
     @Test
     fun testBuiltInRegistry_ContainsRecommendedVersions() {
-        // Verify catalog has 4.3, 4.4, 4.2, 4.1, 4.0, 3.5
-        val registryKeys = listOf("4.3", "4.4", "4.2", "4.1", "4.0", "3.5")
-        // Check that keys are recognized
-        assertEquals(6, registryKeys.size)
-        assertTrue(registryKeys.contains("4.3"))
-        assertTrue(registryKeys.contains("4.4"))
-        assertTrue(registryKeys.contains("3.5"))
+        val builtIn = CoreManager.builtInRegistry
+        assertNotNull(builtIn)
+        assertTrue(builtIn.isNotEmpty())
+        val keys = builtIn.map { it.versionKey }
+        assertTrue(keys.contains("4.3"))
+        assertTrue(keys.contains("4.4"))
+        assertTrue(keys.contains("3.5"))
+        assertTrue(keys.contains("3.6"))
     }
 
     @Test

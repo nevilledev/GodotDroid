@@ -46,6 +46,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -74,10 +75,10 @@ import com.godotdroid.ui.theme.TextTertiaryDark
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun CoreManagerSheet(
-    installedCores: List<InstalledCore>,
-    registryCores: List<CoreDescriptor>,
-    downloadProgress: DownloadProgress?,
-    isDownloading: Boolean,
+    installedCores: List<InstalledCore> = emptyList(),
+    registryCores: List<CoreDescriptor> = emptyList(),
+    downloadProgress: DownloadProgress? = null,
+    isDownloading: Boolean = false,
     sheetState: SheetState,
     onDismiss: () -> Unit,
     onImportTemplate: (Uri, String) -> Unit,
@@ -92,6 +93,9 @@ fun CoreManagerSheet(
 ) {
     var selectedImportVersionKey by remember { mutableStateOf("4.3") }
     var registryUrlInput by remember(currentRegistryUrl) { mutableStateOf(currentRegistryUrl) }
+
+    val distinctInstalled = remember(installedCores) { (installedCores ?: emptyList()).distinctBy { it.versionKey } }
+    val distinctRegistry = remember(registryCores) { (registryCores ?: emptyList()).distinctBy { it.versionKey } }
 
     // SAF Picker for local export template (.apk, .tpz, .aar)
     val openTemplateLauncher = rememberLauncherForActivityResult(
@@ -229,7 +233,7 @@ fun CoreManagerSheet(
 
             // Section 1: Installed Cores
             Text(
-                text = "INSTALLED CORES (${installedCores.size})",
+                text = "INSTALLED CORES (${distinctInstalled.size})",
                 color = TextTertiaryDark,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
@@ -237,7 +241,7 @@ fun CoreManagerSheet(
             )
             Spacer(modifier = Modifier.height(8.dp))
 
-            if (installedCores.isEmpty()) {
+            if (distinctInstalled.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -254,11 +258,13 @@ fun CoreManagerSheet(
                 }
             } else {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    for (core in installedCores) {
-                        InstalledCoreCard(
-                            core = core,
-                            onDelete = { onDeleteCore(core.versionKey) }
-                        )
+                    for (core in distinctInstalled) {
+                        key("installed_${core.versionKey}") {
+                            InstalledCoreCard(
+                                core = core,
+                                onDelete = { onDeleteCore(core.versionKey) }
+                            )
+                        }
                     }
                 }
             }
@@ -421,7 +427,7 @@ fun CoreManagerSheet(
             Spacer(modifier = Modifier.height(14.dp))
 
             // Godot 4.x Cores
-            val godot4Cores = registryCores.filter { it.versionKey.startsWith("4.") }
+            val godot4Cores = distinctRegistry.filter { it.versionKey.startsWith("4.") }
             if (godot4Cores.isNotEmpty()) {
                 Text(
                     text = "Godot 4.x Cores (Vulkan / Compatibility)",
@@ -432,20 +438,22 @@ fun CoreManagerSheet(
                 Spacer(modifier = Modifier.height(6.dp))
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     for (descriptor in godot4Cores) {
-                        val isAlreadyInstalled = installedCores.any { it.versionKey == descriptor.versionKey }
-                        RegistryCoreCard(
-                            descriptor = descriptor,
-                            isInstalled = isAlreadyInstalled,
-                            isDownloading = isDownloading,
-                            onDownload = { onDownloadCore(descriptor) }
-                        )
+                        key("g4_${descriptor.versionKey}") {
+                            val isAlreadyInstalled = distinctInstalled.any { it.versionKey == descriptor.versionKey }
+                            RegistryCoreCard(
+                                descriptor = descriptor,
+                                isInstalled = isAlreadyInstalled,
+                                isDownloading = isDownloading,
+                                onDownload = { onDownloadCore(descriptor) }
+                            )
+                        }
                     }
                 }
                 Spacer(modifier = Modifier.height(16.dp))
             }
 
             // Godot 3.x Cores
-            val godot3Cores = registryCores.filter { it.versionKey.startsWith("3.") }
+            val godot3Cores = distinctRegistry.filter { it.versionKey.startsWith("3.") }
             if (godot3Cores.isNotEmpty()) {
                 Text(
                     text = "Godot 3.x Cores (GLES3 / GLES2 Classic)",
@@ -456,13 +464,15 @@ fun CoreManagerSheet(
                 Spacer(modifier = Modifier.height(6.dp))
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     for (descriptor in godot3Cores) {
-                        val isAlreadyInstalled = installedCores.any { it.versionKey == descriptor.versionKey }
-                        RegistryCoreCard(
-                            descriptor = descriptor,
-                            isInstalled = isAlreadyInstalled,
-                            isDownloading = isDownloading,
-                            onDownload = { onDownloadCore(descriptor) }
-                        )
+                        key("g3_${descriptor.versionKey}") {
+                            val isAlreadyInstalled = distinctInstalled.any { it.versionKey == descriptor.versionKey }
+                            RegistryCoreCard(
+                                descriptor = descriptor,
+                                isInstalled = isAlreadyInstalled,
+                                isDownloading = isDownloading,
+                                onDownload = { onDownloadCore(descriptor) }
+                            )
+                        }
                     }
                 }
             }
