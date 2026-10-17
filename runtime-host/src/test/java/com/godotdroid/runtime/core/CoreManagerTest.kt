@@ -179,4 +179,76 @@ class CoreManagerTest {
         assertEquals("4.4", parsed[0].versionKey)
         assertEquals("Godot 4.4 Stable", parsed[0].displayName)
     }
+
+    @Test
+    fun testBuiltInRegistry_ContainsAllMajorAndMinorVersions() {
+        val keys = CoreManager.builtInRegistry.map { it.versionKey }
+        val requiredVersions = listOf(
+            "4.7", "4.6", "4.5", "4.4", "4.3", "4.2", "4.1", "4.0",
+            "3.6", "3.5", "3.4", "3.3", "3.2"
+        )
+        for (v in requiredVersions) {
+            assertTrue("Expected $v in builtInRegistry", keys.contains(v))
+        }
+    }
+
+    @Test
+    fun testCompareVersionsDescending() {
+        assertTrue(CoreManager.compareVersionsDescending("4.7", "4.6") < 0)
+        assertTrue(CoreManager.compareVersionsDescending("4.6", "4.7") > 0)
+        assertTrue(CoreManager.compareVersionsDescending("4.10", "4.9") < 0)
+        assertTrue(CoreManager.compareVersionsDescending("4.0", "3.6") < 0)
+        assertTrue(CoreManager.compareVersionsDescending("3.6", "3.2") < 0)
+        assertEquals(0, CoreManager.compareVersionsDescending("4.3", "4.3"))
+    }
+
+    @Test
+    fun testMergeWithBuiltInRegistry_PreservesMissingVersionsAndSortsDescending() {
+        val remoteList = listOf(
+            CoreDescriptor(
+                versionKey = "4.3",
+                displayName = "Remote Godot 4.3",
+                engineVersion = "4.3.0",
+                downloadUrl = "https://custom.cdn/core_4.3.zip"
+            ),
+            CoreDescriptor(
+                versionKey = "3.6",
+                displayName = "Remote Godot 3.6",
+                engineVersion = "3.6.0",
+                downloadUrl = "https://custom.cdn/core_3.6.zip"
+            )
+        )
+
+        val merged = CoreManager.mergeWithBuiltInRegistry(remoteList)
+
+        // All 13 supported versions should be present
+        val keys = merged.map { it.versionKey }
+        assertTrue(keys.contains("4.7"))
+        assertTrue(keys.contains("4.5"))
+        assertTrue(keys.contains("4.3"))
+        assertTrue(keys.contains("3.6"))
+        assertTrue(keys.contains("3.2"))
+
+        // Remote versions should override built-in versions
+        val item43 = merged.first { it.versionKey == "4.3" }
+        assertEquals("Remote Godot 4.3", item43.displayName)
+        assertEquals("https://custom.cdn/core_4.3.zip", item43.downloadUrl)
+
+        // First item should be 4.7 and last should be 3.2 (proper descending sort)
+        assertEquals("4.7", merged.first().versionKey)
+        assertEquals("3.2", merged.last().versionKey)
+    }
+
+    @Test
+    fun testOfficialTpzCandidateUrls() {
+        val urls45 = OfficialTpzRangeDownloader.getCandidateTpzUrls("4.5")
+        assertTrue(urls45.any { it.contains("4.5-stable") })
+        assertTrue(urls45.all { it.endsWith(".tpz") })
+
+        val urls47 = OfficialTpzRangeDownloader.getCandidateTpzUrls("4.7")
+        assertTrue(urls47.any { it.contains("4.7") })
+
+        val urls34 = OfficialTpzRangeDownloader.getCandidateTpzUrls("3.4")
+        assertTrue(urls34.any { it.contains("3.4.5-stable") })
+    }
 }

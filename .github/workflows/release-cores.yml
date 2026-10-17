@@ -6,7 +6,7 @@ on:
       godot_versions:
         description: 'Space-separated list of Godot versions to build and publish'
         required: false
-        default: '4.4.1-stable 4.3-stable 4.2.2-stable 4.1.4-stable 4.0.4-stable 3.6-stable 3.5.3-stable'
+        default: '4.6-dev1 4.5-stable 4.4.1-stable 4.3-stable 4.2.2-stable 4.1.4-stable 4.0.4-stable 3.6-stable 3.5.3-stable 3.4.5-stable'
         type: string
 
 concurrency:

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Godot Android Library Resources -->
+    <dimen name="text_edit_height">30dp</dimen>
+    <string name="error_engine_setup_message">Engine setup failed.</string>
+    <string name="error_missing_vulkan_requirements_message">Your device does not meet the requirements to run Vulkan on Android.</string>
+    <string name="godot_project_name_string">Godot Game</string>
+</resources>

@@ -29,11 +29,15 @@ import androidx.compose.material.icons.filled.RocketLaunch
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -100,7 +104,7 @@ fun GameLibraryScreen(
     val exportSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     var showCoreManagerSheet by remember { mutableStateOf(false) }
-    var promptInstallData by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var promptInstallData by remember { mutableStateOf<UiEvent.PromptCoreInstall?>(null) }
     var gameToExport by remember { mutableStateOf<SavedGameItem?>(null) }
 
     // SAF File Picker for Games (.exe, .pck)
@@ -116,8 +120,11 @@ fun GameLibraryScreen(
                 is UiEvent.ShowMessage -> snackbarHostState.showSnackbar(event.message)
                 is UiEvent.ShowLaunchDialog -> {}
                 is UiEvent.ShowExportDialog -> gameToExport = selectedGame
-                is UiEvent.PromptCoreInstall -> promptInstallData = event.versionKey to event.gameTitle
-                is UiEvent.LaunchGame -> context.startActivity(event.intent)
+                is UiEvent.PromptCoreInstall -> promptInstallData = event
+                is UiEvent.LaunchGame -> {
+                    promptInstallData = null
+                    context.startActivity(event.intent)
+                }
             }
         }
     }
@@ -312,38 +319,167 @@ fun GameLibraryScreen(
             }
 
             // Prompt Core Install Dialog
-            promptInstallData?.let { (versionKey, title) ->
-                AlertDialog(
-                    onDismissRequest = { promptInstallData = null },
-                    icon = { Icon(Icons.Default.Warning, contentDescription = null, tint = WarningAmber) },
-                    title = { Text("Godot $versionKey Core Required") },
-                    text = {
-                        Text(
-                            "Game \"$title\" was built with Godot $versionKey bytecode.\n\n" +
-                                    "To launch this game, GodotDroid needs the matching Godot $versionKey ARM64 engine core. " +
-                                    "You can download it from our official registry or import your official export template.",
-                            fontSize = 13.sp,
-                            lineHeight = 18.sp
-                        )
-                    },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            viewModel.selectGame(null)
-                            promptInstallData = null
-                            showCoreManagerSheet = true
-                        }) {
-                            Text("Open Core Manager", color = GodotBlue, fontWeight = FontWeight.Bold)
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { promptInstallData = null }) {
-                            Text("Cancel", color = TextSecondaryDark)
-                        }
-                    },
-                    containerColor = SurfaceDark,
-                    titleContentColor = TextPrimaryDark,
-                    textContentColor = TextSecondaryDark
-                )
+            promptInstallData?.let { prompt ->
+                if (isDownloadingCore && downloadProgress != null) {
+                    AlertDialog(
+                        onDismissRequest = { /* Modal during active auto-download */ },
+                        icon = {
+                            CircularProgressIndicator(
+                                color = GodotBlue,
+                                strokeWidth = 3.dp,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        },
+                        title = {
+                            Text(
+                                "Downloading Godot ${prompt.versionKey} Core...",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp
+                            )
+                        },
+                        text = {
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Text(
+                                    text = downloadProgress?.currentStage ?: "Preparing download...",
+                                    color = TextSecondaryDark,
+                                    fontSize = 13.sp
+                                )
+                                Spacer(modifier = Modifier.height(10.dp))
+                                LinearProgressIndicator(
+                                    progress = { ((downloadProgress?.percentage ?: 0) / 100f).coerceIn(0f, 1f) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    color = GodotBlue,
+                                    trackColor = SurfaceVariantDark
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = "Game \"${prompt.gameTitle}\" will launch automatically once installed.",
+                                    color = AccentCyan,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        },
+                        confirmButton = {},
+                        containerColor = SurfaceDark,
+                        titleContentColor = TextPrimaryDark,
+                        textContentColor = TextSecondaryDark
+                    )
+                } else {
+                    AlertDialog(
+                        onDismissRequest = { promptInstallData = null },
+                        icon = { Icon(Icons.Default.Warning, contentDescription = null, tint = WarningAmber) },
+                        title = {
+                            Text(
+                                "Godot ${prompt.versionKey} Core Required",
+                                fontWeight = FontWeight.Bold
+                            )
+                        },
+                        text = {
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Text(
+                                    text = "Game \"${prompt.gameTitle}\" was built with Godot ${prompt.versionKey} bytecode.\n\n" +
+                                            "To run on Android, GodotDroid requires the matching Godot ${prompt.versionKey} ARM64 runtime core.",
+                                    fontSize = 13.sp,
+                                    lineHeight = 18.sp,
+                                    color = TextSecondaryDark
+                                )
+                                if (prompt.fallbackCore != null) {
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Text(
+                                        text = "⚡ You have Godot ${prompt.fallbackCore.versionKey} core installed, which may run this game.",
+                                        fontSize = 12.sp,
+                                        color = AccentCyan,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
+                        },
+                        confirmButton = {
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Button(
+                                    onClick = {
+                                        viewModel.autoDownloadAndLaunch(
+                                            context = context,
+                                            game = prompt.game,
+                                            versionKey = prompt.versionKey,
+                                            controlPreset = prompt.controlPreset,
+                                            injectSteamStub = prompt.injectSteamStub
+                                        )
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = GodotBlue),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.RocketLaunch,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Auto-Download Godot ${prompt.versionKey} & Launch",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp
+                                    )
+                                }
+
+                                if (prompt.fallbackCore != null) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            val data = prompt
+                                            promptInstallData = null
+                                            viewModel.launchWithInstalledCore(
+                                                context = context,
+                                                game = data.game,
+                                                installedCore = data.fallbackCore,
+                                                controlPreset = data.controlPreset,
+                                                injectSteamStub = data.injectSteamStub
+                                            )
+                                        },
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.PlayArrow,
+                                            contentDescription = null,
+                                            tint = AccentCyan,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Try Launching with Godot ${prompt.fallbackCore.versionKey} Core",
+                                            fontSize = 12.sp,
+                                            color = AccentCyan
+                                        )
+                                    }
+                                }
+
+                                Row(
+                                    horizontalArrangement = Arrangement.End,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    TextButton(onClick = {
+                                        promptInstallData = null
+                                        viewModel.selectGame(null)
+                                        showCoreManagerSheet = true
+                                    }) {
+                                        Text("Open Core Manager", color = GodotBlue, fontSize = 12.sp)
+                                    }
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    TextButton(onClick = { promptInstallData = null }) {
+                                        Text("Cancel", color = TextSecondaryDark, fontSize = 12.sp)
+                                    }
+                                }
+                            }
+                        },
+                        containerColor = SurfaceDark,
+                        titleContentColor = TextPrimaryDark,
+                        textContentColor = TextSecondaryDark
+                    )
+                }
             }
 
             // Export Standalone APK Sheet

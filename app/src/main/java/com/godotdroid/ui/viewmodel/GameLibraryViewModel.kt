@@ -30,7 +30,14 @@ sealed class UiEvent {
     data class ShowMessage(val message: String) : UiEvent()
     data class ShowLaunchDialog(val gameTitle: String, val renderer: RendererType) : UiEvent()
     data class ShowExportDialog(val gameTitle: String) : UiEvent()
-    data class PromptCoreInstall(val versionKey: String, val gameTitle: String) : UiEvent()
+    data class PromptCoreInstall(
+        val versionKey: String,
+        val gameTitle: String,
+        val fallbackCore: InstalledCore? = null,
+        val game: SavedGameItem,
+        val controlPreset: String = com.godotdroid.overlay.model.DefaultControlPresets.PRESET_PC_KEYBOARD,
+        val injectSteamStub: Boolean = false
+    ) : UiEvent()
     data class LaunchGame(val intent: Intent) : UiEvent()
 }
 
@@ -53,8 +60,7 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
     val selectedGame: StateFlow<SavedGameItem?> = _selectedGame.asStateFlow()
 
     // Core Management States
-    private val _installedCores = MutableStateFlow<List<InstalledCore>>(emptyList())
-    val installedCores: StateFlow<List<InstalledCore>> = _installedCores.asStateFlow()
+    val installedCores: StateFlow<List<InstalledCore>> = coreManager.installedCores
 
     private val _isDownloadingCore = MutableStateFlow(false)
     val isDownloadingCore: StateFlow<Boolean> = _isDownloadingCore.asStateFlow()
@@ -96,7 +102,7 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
 
     fun refreshCores() {
         viewModelScope.launch {
-            _installedCores.value = coreManager.getInstalledCores()
+            coreManager.refreshInstalledCores()
         }
     }
 
@@ -171,11 +177,19 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
             val minor = game.report.pckHeader.engineMinor
             val versionKey = "$major.$minor"
 
-            val matchingCore = coreManager.getCore(versionKey)
-                ?: coreManager.findMatchingCore(major, minor)
-
-            if (matchingCore == null) {
-                _uiEvents.emit(UiEvent.PromptCoreInstall(versionKey, game.report.gameTitle))
+            val exactCore = coreManager.getCore(versionKey)
+            if (exactCore == null) {
+                val fallbackCore = coreManager.findMatchingCore(major, minor)
+                _uiEvents.emit(
+                    UiEvent.PromptCoreInstall(
+                        versionKey = versionKey,
+                        gameTitle = game.report.gameTitle,
+                        fallbackCore = fallbackCore,
+                        game = game,
+                        controlPreset = controlPreset,
+                        injectSteamStub = injectSteamStub
+                    )
+                )
                 return@launch
             }
 
@@ -185,13 +199,86 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 gameTitle = game.report.gameTitle,
                 filePath = game.filePath,
                 renderer = game.selectedRenderer,
-                versionKey = matchingCore.versionKey,
+                versionKey = exactCore.versionKey,
                 mainSceneOverride = game.report.mainScene,
                 injectSteamStub = injectSteamStub,
                 controlPreset = controlPreset
             )
 
             _uiEvents.emit(UiEvent.LaunchGame(intent))
+        }
+    }
+
+    fun launchWithInstalledCore(
+        context: Context,
+        game: SavedGameItem,
+        installedCore: InstalledCore,
+        controlPreset: String = com.godotdroid.overlay.model.DefaultControlPresets.PRESET_PC_KEYBOARD,
+        injectSteamStub: Boolean = false
+    ) {
+        viewModelScope.launch {
+            val intent = GodotRunnerActivity.createIntent(
+                context = context,
+                gameId = game.id,
+                gameTitle = game.report.gameTitle,
+                filePath = game.filePath,
+                renderer = game.selectedRenderer,
+                versionKey = installedCore.versionKey,
+                mainSceneOverride = game.report.mainScene,
+                injectSteamStub = injectSteamStub,
+                controlPreset = controlPreset
+            )
+            _uiEvents.emit(UiEvent.LaunchGame(intent))
+        }
+    }
+
+    fun autoDownloadAndLaunch(
+        context: Context,
+        game: SavedGameItem,
+        versionKey: String,
+        controlPreset: String = com.godotdroid.overlay.model.DefaultControlPresets.PRESET_PC_KEYBOARD,
+        injectSteamStub: Boolean = false
+    ) {
+        viewModelScope.launch {
+            _isDownloadingCore.value = true
+            _coreErrorMessage.value = null
+
+            val descriptor = coreManager.getRegistryCatalog().firstOrNull { it.versionKey == versionKey }
+                ?: CoreDescriptor(
+                    versionKey = versionKey,
+                    displayName = "Godot $versionKey",
+                    engineVersion = "$versionKey.0",
+                    downloadUrl = "${coreManager.getRegistryBaseUrl()}/core_$versionKey.zip"
+                )
+
+            val result = coreManager.downloadCore(
+                descriptor = descriptor,
+                onProgress = { progress -> _downloadProgress.value = progress }
+            )
+
+            _isDownloadingCore.value = false
+            _downloadProgress.value = null
+
+            result.onSuccess { installedCore ->
+                refreshCores()
+                _uiEvents.emit(UiEvent.ShowMessage("Godot $versionKey core installed! Launching ${game.report.gameTitle}..."))
+                val intent = GodotRunnerActivity.createIntent(
+                    context = context,
+                    gameId = game.id,
+                    gameTitle = game.report.gameTitle,
+                    filePath = game.filePath,
+                    renderer = game.selectedRenderer,
+                    versionKey = installedCore.versionKey,
+                    mainSceneOverride = game.report.mainScene,
+                    injectSteamStub = injectSteamStub,
+                    controlPreset = controlPreset
+                )
+                _uiEvents.emit(UiEvent.LaunchGame(intent))
+            }.onFailure { error ->
+                val msg = "Auto-download failed: ${error.message}"
+                _coreErrorMessage.value = msg
+                _uiEvents.emit(UiEvent.ShowMessage(msg))
+            }
         }
     }
 

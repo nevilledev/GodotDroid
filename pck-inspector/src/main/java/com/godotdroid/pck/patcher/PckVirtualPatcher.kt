@@ -178,7 +178,8 @@ class PckVirtualPatcher(
             if (payloadLength > 0) {
                 var copied = 0L
                 while (copied < payloadLength) {
-                    val count = srcChannel.transferTo(oldPayloadStart + copied, payloadLength - copied, dstChannel)
+                    val chunkSize = minOf(32L * 1024L * 1024L, payloadLength - copied)
+                    val count = srcChannel.transferTo(oldPayloadStart + copied, chunkSize, dstChannel)
                     if (count <= 0) break
                     copied += count
                 }
@@ -288,7 +289,8 @@ class PckVirtualPatcher(
             val payloadRegionLength = header.directoryOffset
             var copied = 0L
             while (copied < payloadRegionLength) {
-                val count = srcChannel.transferTo(copied, payloadRegionLength - copied, dstChannel)
+                val chunkSize = minOf(32L * 1024L * 1024L, payloadRegionLength - copied)
+                val count = srcChannel.transferTo(copied, chunkSize, dstChannel)
                 if (count <= 0) break
                 copied += count
             }
@@ -358,7 +360,10 @@ class PckVirtualPatcher(
         }
 
         if (targetFile.exists()) targetFile.delete()
-        tempTarget.renameTo(targetFile)
+        if (!tempTarget.renameTo(targetFile)) {
+            tempTarget.copyTo(targetFile, overwrite = true)
+            tempTarget.delete()
+        }
 
         return PckPatchResult(
             totalFilesCount = retainedEntries.size + injectedEntries.size,

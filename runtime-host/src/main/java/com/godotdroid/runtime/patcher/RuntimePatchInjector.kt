@@ -1,6 +1,7 @@
 package com.godotdroid.runtime.patcher
 
 import android.content.Context
+import android.util.Log
 import com.godotdroid.pck.model.PluginDependency
 import com.godotdroid.pck.model.RendererType
 import java.io.File
@@ -79,50 +80,58 @@ class RuntimePatchInjector(private val context: Context) {
         // 3. Stage any available Android ARM64 GDExtension libraries
         stageGdExtensionLibraries(gameDir, jniLibsDir, plugins)
 
-        // 4. Inject virtual files directly into the staged PCK for 100% res:// compatibility
+        // 4. Inject virtual files directly into the staged PCK ONLY when necessary (Steam stub or in-PCK plugin rewriting)
         var targetPckOrExe = pckOrExeFile
-        try {
-            val filesToInject = mutableMapOf<String, ByteArray>()
-            filesToInject["res://override.cfg"] = overrideContent.toByteArray(Charsets.UTF_8)
-            if (injectSteamStub) {
-                val stubContent = SteamStubGenerator.generateStub(engineMajor)
-                filesToInject["res://godotdroid_steam_stub.gd"] = stubContent.toByteArray(Charsets.UTF_8)
-            }
+        val needsPckPatching = injectSteamStub || plugins.any { it.configPath.isNotBlank() }
 
-            // In-PCK .gdextension & .gdnlib rewriting
-            val pluginCompat = PluginCompatManager(context)
-            for (plugin in plugins) {
-                if (plugin.configPath.isNotBlank()) {
-                    var originalConfigText = ""
-                    try {
-                        java.io.RandomAccessFile(pckOrExeFile, "r").use { raf ->
-                            val inspector = com.godotdroid.pck.inspector.PckBinaryInspector()
-                            val inspectResult = inspector.inspect(raf.channel, raf.length())
-                            val entry = inspectResult.files.find { it.path == plugin.configPath }
-                            if (entry != null) {
-                                originalConfigText = String(inspector.extractFileBytes(raf.channel, entry), Charsets.UTF_8)
-                            }
-                        }
-                    } catch (_: Exception) {}
-
-                    val patchedConfig = pluginCompat.patchExtensionConfigContent(
-                        originalIni = originalConfigText,
-                        isGodot4 = (engineMajor >= 4),
-                        androidSoNames = plugin.androidLibraries.values.map { it.substringAfterLast('/') }.ifEmpty { listOf("${plugin.name}.so") }
-                    )
-                    filesToInject[plugin.configPath] = patchedConfig.toByteArray(Charsets.UTF_8)
+        if (needsPckPatching) {
+            try {
+                val filesToInject = mutableMapOf<String, ByteArray>()
+                filesToInject["res://override.cfg"] = overrideContent.toByteArray(Charsets.UTF_8)
+                if (injectSteamStub) {
+                    val stubContent = SteamStubGenerator.generateStub(engineMajor)
+                    filesToInject["res://godotdroid_steam_stub.gd"] = stubContent.toByteArray(Charsets.UTF_8)
                 }
-            }
 
-            val stagedPck = File(gameDir, "runtime_staged.pck")
-            if (stagedPck.exists()) stagedPck.setWritable(true)
-            val patcher = com.godotdroid.pck.patcher.PckVirtualPatcher()
-            patcher.patchPck(pckOrExeFile, stagedPck, filesToInject)
-            stagedPck.setReadOnly()
-            targetPckOrExe = stagedPck
-        } catch (_: Exception) {
-            // Fallback to original file if virtual patching fails
-            targetPckOrExe = pckOrExeFile
+                // In-PCK .gdextension & .gdnlib rewriting
+                val pluginCompat = PluginCompatManager(context)
+                for (plugin in plugins) {
+                    if (plugin.configPath.isNotBlank()) {
+                        var originalConfigText = ""
+                        try {
+                            java.io.RandomAccessFile(pckOrExeFile, "r").use { raf ->
+                                val inspector = com.godotdroid.pck.inspector.PckBinaryInspector()
+                                val inspectResult = inspector.inspect(raf.channel, raf.length())
+                                val entry = inspectResult.files.find { it.path == plugin.configPath }
+                                if (entry != null) {
+                                    originalConfigText = String(inspector.extractFileBytes(raf.channel, entry), Charsets.UTF_8)
+                                }
+                            }
+                        } catch (_: Exception) {}
+
+                        val patchedConfig = pluginCompat.patchExtensionConfigContent(
+                            originalIni = originalConfigText,
+                            isGodot4 = (engineMajor >= 4),
+                            androidSoNames = plugin.androidLibraries.values.map { it.substringAfterLast('/') }.ifEmpty { listOf("${plugin.name}.so") }
+                        )
+                        filesToInject[plugin.configPath] = patchedConfig.toByteArray(Charsets.UTF_8)
+                    }
+                }
+
+                val stagedPck = File(gameDir, "runtime_staged.pck")
+                if (stagedPck.exists()) stagedPck.setWritable(true)
+                val patcher = com.godotdroid.pck.patcher.PckVirtualPatcher()
+                patcher.patchPck(pckOrExeFile, stagedPck, filesToInject)
+                stagedPck.setReadOnly()
+                if (stagedPck.exists() && stagedPck.length() > 0) {
+                    targetPckOrExe = stagedPck
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Virtual PCK patch skipped or failed: ${e.message}")
+                targetPckOrExe = pckOrExeFile
+            }
+        } else {
+            Log.i(TAG, "Fast-path: launching game package directly via --main-pack without disk duplication")
         }
 
         // 5. Build CLI arguments
@@ -322,5 +331,9 @@ class RuntimePatchInjector(private val context: Context) {
                 file.delete()
             }
         }
+    }
+
+    companion object {
+        private const val TAG = "RuntimePatchInjector"
     }
 }

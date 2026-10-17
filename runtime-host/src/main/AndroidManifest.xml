@@ -9,7 +9,9 @@
             android:configChanges="orientation|keyboardHidden|screenSize|smallestScreenSize|density|screenLayout|uiMode|navigation"
             android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
             android:launchMode="singleTask"
-            android:exported="false" />
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:exported="true" />
 
         <service
             android:name="com.godotdroid.runtime.service.GodotRunnerService"

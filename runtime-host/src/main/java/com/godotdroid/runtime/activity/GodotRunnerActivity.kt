@@ -3,6 +3,7 @@ package com.godotdroid.runtime.activity
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.Gravity
@@ -28,6 +29,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.godotdroid.overlay.model.DefaultControlPresets
 import com.godotdroid.pck.model.RendererType
 import com.godotdroid.runtime.core.CoreManager
@@ -66,11 +71,21 @@ class GodotRunnerActivity : ComponentActivity() {
 
         // 1. Setup Immersive Full-Screen Window
         requestWindowFeature(Window.FEATURE_NO_TITLE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
         window.setFlags(
             WindowManager.LayoutParams.FLAG_FULLSCREEN,
             WindowManager.LayoutParams.FLAG_FULLSCREEN
         )
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        @Suppress("DEPRECATION")
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+            WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+            WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+        )
 
         val controller = WindowCompat.getInsetsController(window, window.decorView)
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
@@ -138,72 +153,76 @@ class GodotRunnerActivity : ComponentActivity() {
 
         Log.i(TAG, "Launching $gameTitle with core ${core.engineVersion} (${core.versionKey})")
 
-        // 5. Prepare runtime environment (override.cfg, CLI args, plugins, Steam stub)
-        val environment = patchInjector.prepareRuntimeEnvironment(
-            gameId = gameId.ifBlank { "game_${System.currentTimeMillis()}" },
-            pckOrExeFile = targetFile,
-            selectedRenderer = renderer,
-            mainSceneOverride = mainSceneOverride,
-            injectSteamStub = injectSteamStub,
-            engineMajor = major
-        )
-
-        // 6. Instantiate Hybrid Input Bridge
-        inputBridge = GodotInputBridge(
-            activity = this,
-            targetViewProvider = { engineInstance?.renderView },
-            classLoaderProvider = { engineInstance?.classLoader }
-        )
-
-        // 7. Dynamically load and initialize Godot
-        val result = dynamicLoader.loadAndInitialize(
-            core = core,
-            environment = environment,
-            activity = this,
-            container = rootContainer
-        )
-
-        result.onSuccess { instance ->
-            engineInstance = instance
-            hideLoadingIndicator()
-
-            // 8. Embed Touch Controls Overlay & Floating HUD above Godot SurfaceView
-            val overlay = ComposeView(this).apply {
-                setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
-                setContent {
-                    val metrics by (performanceMonitor?.metrics?.collectAsState()
-                        ?: remember { mutableStateOf(PerformanceMonitor.PerformanceMetrics()) })
-
-                    GodotRunnerOverlayScreen(
-                        gameId = currentGameId,
-                        initialPreset = controlPreset,
-                        inputDispatcher = inputBridge,
-                        onExitGame = { finish() },
-                        performanceMetrics = metrics,
-                        hasPhysicalGamepad = hasPhysicalGamepad,
-                        isControllerActive = isControllerActive
-                    )
-                }
-            }
-            composeOverlay = overlay
-            rootContainer.addView(
-                overlay,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT
+        // 5. Prepare runtime environment and load Godot asynchronously
+        lifecycleScope.launch {
+            val environment = withContext(Dispatchers.IO) {
+                patchInjector.prepareRuntimeEnvironment(
+                    gameId = gameId.ifBlank { "game_${System.currentTimeMillis()}" },
+                    pckOrExeFile = targetFile,
+                    selectedRenderer = renderer,
+                    mainSceneOverride = mainSceneOverride,
+                    injectSteamStub = injectSteamStub,
+                    engineMajor = major
                 )
+            }
+
+            // 6. Instantiate Hybrid Input Bridge
+            inputBridge = GodotInputBridge(
+                activity = this@GodotRunnerActivity,
+                targetViewProvider = { engineInstance?.renderView },
+                classLoaderProvider = { engineInstance?.classLoader }
             )
 
-            instance.onStart()
-            instance.onResume()
-        }.onFailure { error ->
-            Log.e(TAG, "Failed to initialize Godot engine", error)
-            Toast.makeText(
-                this,
-                "Godot initialization failed: ${error.message}",
-                Toast.LENGTH_LONG
-            ).show()
-            finish()
+            // 7. Dynamically load and initialize Godot
+            val result = dynamicLoader.loadAndInitialize(
+                core = core,
+                environment = environment,
+                activity = this@GodotRunnerActivity,
+                container = rootContainer
+            )
+
+            result.onSuccess { instance ->
+                engineInstance = instance
+                hideLoadingIndicator()
+
+                // 8. Embed Touch Controls Overlay & Floating HUD above Godot SurfaceView
+                val overlay = ComposeView(this@GodotRunnerActivity).apply {
+                    setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+                    setContent {
+                        val metrics by (performanceMonitor?.metrics?.collectAsState()
+                            ?: remember { mutableStateOf(PerformanceMonitor.PerformanceMetrics()) })
+
+                        GodotRunnerOverlayScreen(
+                            gameId = currentGameId,
+                            initialPreset = controlPreset,
+                            inputDispatcher = inputBridge,
+                            onExitGame = { finish() },
+                            performanceMetrics = metrics,
+                            hasPhysicalGamepad = hasPhysicalGamepad,
+                            isControllerActive = isControllerActive
+                        )
+                    }
+                }
+                composeOverlay = overlay
+                rootContainer.addView(
+                    overlay,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
+                    )
+                )
+
+                instance.onStart()
+                instance.onResume()
+            }.onFailure { error ->
+                Log.e(TAG, "Failed to initialize Godot engine", error)
+                Toast.makeText(
+                    this@GodotRunnerActivity,
+                    "Godot initialization failed: ${error.message}",
+                    Toast.LENGTH_LONG
+                ).show()
+                finish()
+            }
         }
     }
 

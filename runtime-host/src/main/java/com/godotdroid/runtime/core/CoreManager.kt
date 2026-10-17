@@ -42,6 +42,19 @@ class CoreManager(private val context: Context) {
             .build()
     }
 
+    private val tpzRangeDownloader: OfficialTpzRangeDownloader by lazy {
+        OfficialTpzRangeDownloader(httpClient)
+    }
+
+    private val _installedCores = MutableStateFlow<List<InstalledCore>>(getInstalledCores())
+    val installedCores: StateFlow<List<InstalledCore>> = _installedCores.asStateFlow()
+
+    fun refreshInstalledCores(): List<InstalledCore> {
+        val list = getInstalledCores()
+        _installedCores.value = list
+        return list
+    }
+
     private val _registryCatalog = MutableStateFlow<List<CoreDescriptor>>(loadInitialCatalog())
     val registryCatalog: StateFlow<List<CoreDescriptor>> = _registryCatalog.asStateFlow()
 
@@ -73,12 +86,12 @@ class CoreManager(private val context: Context) {
     }
 
     /**
-     * Loads initial catalog: cached remote manifest if available, otherwise builtInRegistry.
+     * Loads initial catalog: cached remote manifest merged with builtInRegistry if available, otherwise builtInRegistry.
      */
     private fun loadInitialCatalog(): List<CoreDescriptor> {
         val cached = loadCachedManifest()
         return if (cached.isNotEmpty()) {
-            cached
+            mergeWithBuiltInRegistry(cached)
         } else {
             builtInRegistry
         }
@@ -131,9 +144,10 @@ class CoreManager(private val context: Context) {
                 Log.e(TAG, "Failed to cache manifest file to ${cachedManifestFile.absolutePath}", e)
             }
 
-            _registryCatalog.value = parsed
-            Log.i(TAG, "Manifest parsed: ${parsed.size} core(s) loaded")
-            Result.success(parsed)
+            val merged = mergeWithBuiltInRegistry(parsed)
+            _registryCatalog.value = merged
+            Log.i(TAG, "Manifest parsed: ${parsed.size} remote cores, total ${merged.size} in catalog")
+            Result.success(merged)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to fetch remote cores manifest from $manifestUrl", e)
             Result.failure(e)
@@ -407,6 +421,7 @@ class CoreManager(private val context: Context) {
                 installedTimestamp = System.currentTimeMillis(),
                 sha256 = sha256
             )
+            refreshInstalledCores()
             Result.success(installedCore)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to import core $versionKey", e)
@@ -416,6 +431,8 @@ class CoreManager(private val context: Context) {
 
     /**
      * Downloads a Godot runtime core zip from remote registry and installs it.
+     * Automatically falls back to Official Godot TPZ Range Downloader if custom zip is missing (HTTP 404)
+     * or fails.
      */
     suspend fun downloadCore(
         descriptor: CoreDescriptor,
@@ -423,8 +440,14 @@ class CoreManager(private val context: Context) {
     ): Result<InstalledCore> = withContext(Dispatchers.IO) {
         val fixedUrl = descriptor.downloadUrl.replace("nevilledroid", "nevilledev", ignoreCase = true)
         Log.i(TAG, "Get tapped: versionKey=${descriptor.versionKey}, url=$fixedUrl")
-        onProgress?.invoke(DownloadProgress(0, 100, 0, "Connecting to ${descriptor.displayName}..."))
 
+        // If the downloadUrl points directly to godotengine release assets that are not .tpz or if blank, jump directly to TPZ range downloader
+        if (fixedUrl.isBlank() || (fixedUrl.contains("godotengine/godot/releases") && !fixedUrl.endsWith(".tpz"))) {
+            Log.i(TAG, "Direct pre-built zip not hosted for ${descriptor.versionKey}. Using Official TPZ Range Downloader...")
+            return@withContext downloadViaOfficialTpz(descriptor, onProgress)
+        }
+
+        onProgress?.invoke(DownloadProgress(0, 100, 0, "Connecting to ${descriptor.displayName}..."))
         val tempFile = File(context.cacheDir, "core_download_${descriptor.versionKey}_${System.currentTimeMillis()}.tmp")
 
         try {
@@ -439,9 +462,9 @@ class CoreManager(private val context: Context) {
             Log.i(TAG, "HTTP status $statusCode, final URL: $finalUrl")
 
             if (!response.isSuccessful) {
-                val err = "Download failed with HTTP $statusCode from $fixedUrl"
-                Log.e(TAG, err)
-                return@withContext Result.failure(IOException(err))
+                response.close()
+                Log.w(TAG, "Download failed with HTTP $statusCode from $fixedUrl. Falling back to Official Godot TPZ...")
+                return@withContext downloadViaOfficialTpz(descriptor, onProgress)
             }
 
             val body = response.body ?: throw IOException("Empty response body from $fixedUrl")
@@ -509,7 +532,49 @@ class CoreManager(private val context: Context) {
             installResult
         } catch (e: Exception) {
             tempFile.delete()
-            Log.e(TAG, "Failed to download core ${descriptor.versionKey}", e)
+            Log.w(TAG, "Exception downloading core ${descriptor.versionKey} from $fixedUrl: ${e.message}. Falling back to Official Godot TPZ...")
+            downloadViaOfficialTpz(descriptor, onProgress)
+        }
+    }
+
+    /**
+     * Downloads official Android template APK using HTTP Range requests from official Godot release mirrors
+     * without downloading the full ~800 MB - 1 GB archive.
+     */
+    suspend fun downloadViaOfficialTpz(
+        descriptor: CoreDescriptor,
+        onProgress: ((DownloadProgress) -> Unit)? = null
+    ): Result<InstalledCore> = withContext(Dispatchers.IO) {
+        val targetApk = File(context.cacheDir, "temp_official_template_${descriptor.versionKey}_${System.currentTimeMillis()}.apk")
+        try {
+            val tpzResult = tpzRangeDownloader.downloadForVersion(
+                versionKey = descriptor.versionKey,
+                engineVersion = descriptor.engineVersion,
+                targetApkFile = targetApk,
+                onProgress = onProgress
+            )
+            if (tpzResult.isFailure) {
+                return@withContext Result.failure(
+                    tpzResult.exceptionOrNull() ?: IOException("Failed to download official template for Godot ${descriptor.versionKey}")
+                )
+            }
+            val apkFile = tpzResult.getOrThrow()
+            onProgress?.invoke(DownloadProgress(95, 100, 95, "Extracting ARM64 engine binaries..."))
+            val installResult = FileInputStream(apkFile).use { stream ->
+                importCoreFromTemplate(
+                    inputStream = stream,
+                    versionKey = descriptor.versionKey,
+                    engineVersion = descriptor.engineVersion,
+                    sourceName = "Official Godot TPZ (${descriptor.versionKey})",
+                    sourceType = "OFFICIAL_TPZ_RANGE",
+                    onProgress = onProgress
+                )
+            }
+            apkFile.delete()
+            installResult
+        } catch (e: Exception) {
+            if (targetApk.exists()) targetApk.delete()
+            Log.e(TAG, "Failed downloading via official TPZ for ${descriptor.versionKey}", e)
             Result.failure(e)
         }
     }
@@ -523,7 +588,11 @@ class CoreManager(private val context: Context) {
             file.setWritable(true)
             file.delete()
         }
-        return dir.delete()
+        val deleted = dir.delete()
+        if (deleted) {
+            refreshInstalledCores()
+        }
+        return deleted
     }
 
     private fun isArm64So(path: String): Boolean {
@@ -582,31 +651,38 @@ class CoreManager(private val context: Context) {
         val builtInRegistry: List<CoreDescriptor> = listOf(
             // Godot 4.x Cores
             CoreDescriptor(
+                versionKey = "4.7",
+                displayName = "Godot 4.7 Dev (PCK v4)",
+                engineVersion = "4.7.0",
+                downloadUrl = "$DEFAULT_REGISTRY_BASE_URL/core_4.7.zip",
+                sizeBytes = 40_000_000L
+            ),
+            CoreDescriptor(
                 versionKey = "4.6",
                 displayName = "Godot 4.6 Dev (PCK v4)",
                 engineVersion = "4.6.0",
-                downloadUrl = "https://github.com/godotengine/godot/releases/download/4.6-dev1/godot-lib.4.6.0.dev1.template_release.arm64.zip",
+                downloadUrl = "$DEFAULT_REGISTRY_BASE_URL/core_4.6.zip",
                 sizeBytes = 38_000_000L
             ),
             CoreDescriptor(
                 versionKey = "4.5",
                 displayName = "Godot 4.5 Stable (PCK v3)",
                 engineVersion = "4.5.0",
-                downloadUrl = "https://github.com/godotengine/godot/releases/download/4.5-stable/godot-lib.4.5.0.stable.template_release.arm64.zip",
+                downloadUrl = "$DEFAULT_REGISTRY_BASE_URL/core_4.5.zip",
                 sizeBytes = 37_000_000L
             ),
             CoreDescriptor(
                 versionKey = "4.4",
-                displayName = "Godot 4.4 Stable (PCK v3)",
-                engineVersion = "4.4.0",
-                downloadUrl = "https://github.com/godotengine/godot/releases/download/4.4-stable/godot-lib.4.4.0.stable.template_release.arm64.zip",
+                displayName = "Godot 4.4.1 Stable (PCK v3)",
+                engineVersion = "4.4.1",
+                downloadUrl = "$DEFAULT_REGISTRY_BASE_URL/core_4.4.zip",
                 sizeBytes = 36_000_000L
             ),
             CoreDescriptor(
                 versionKey = "4.3",
                 displayName = "Godot 4.3 Stable (Vulkan / Compatibility)",
                 engineVersion = "4.3.0",
-                downloadUrl = "https://github.com/godotengine/godot/releases/download/4.3-stable/godot-lib.4.3.0.stable.template_release.arm64.zip",
+                downloadUrl = "$DEFAULT_REGISTRY_BASE_URL/core_4.3.zip",
                 sizeBytes = 35_000_000L,
                 isRecommended = true
             ),
@@ -614,21 +690,21 @@ class CoreManager(private val context: Context) {
                 versionKey = "4.2",
                 displayName = "Godot 4.2.2 Stable",
                 engineVersion = "4.2.2",
-                downloadUrl = "https://github.com/godotengine/godot/releases/download/4.2.2-stable/godot-lib.4.2.2.stable.template_release.arm64.zip",
+                downloadUrl = "$DEFAULT_REGISTRY_BASE_URL/core_4.2.zip",
                 sizeBytes = 34_000_000L
             ),
             CoreDescriptor(
                 versionKey = "4.1",
-                displayName = "Godot 4.1.3 Stable",
-                engineVersion = "4.1.3",
-                downloadUrl = "https://github.com/godotengine/godot/releases/download/4.1.3-stable/godot-lib.4.1.3.stable.template_release.arm64.zip",
+                displayName = "Godot 4.1.4 Stable",
+                engineVersion = "4.1.4",
+                downloadUrl = "$DEFAULT_REGISTRY_BASE_URL/core_4.1.zip",
                 sizeBytes = 33_000_000L
             ),
             CoreDescriptor(
                 versionKey = "4.0",
                 displayName = "Godot 4.0.4 Stable",
                 engineVersion = "4.0.4",
-                downloadUrl = "https://github.com/godotengine/godot/releases/download/4.0.4-stable/godot-lib.4.0.4.stable.template_release.arm64.zip",
+                downloadUrl = "$DEFAULT_REGISTRY_BASE_URL/core_4.0.zip",
                 sizeBytes = 32_000_000L
             ),
 
@@ -637,7 +713,7 @@ class CoreManager(private val context: Context) {
                 versionKey = "3.6",
                 displayName = "Godot 3.6 Stable (GLES3 / GLES2)",
                 engineVersion = "3.6.0",
-                downloadUrl = "https://github.com/godotengine/godot/releases/download/3.6-stable/godot-lib.3.6.stable.release.arm64.zip",
+                downloadUrl = "$DEFAULT_REGISTRY_BASE_URL/core_3.6.zip",
                 sizeBytes = 30_000_000L,
                 isRecommended = true
             ),
@@ -645,31 +721,65 @@ class CoreManager(private val context: Context) {
                 versionKey = "3.5",
                 displayName = "Godot 3.5.3 (GLES3 / GLES2 Classic)",
                 engineVersion = "3.5.3",
-                downloadUrl = "https://github.com/godotengine/godot/releases/download/3.5.3-stable/godot-lib.3.5.3.stable.release.arm64.zip",
+                downloadUrl = "$DEFAULT_REGISTRY_BASE_URL/core_3.5.zip",
                 sizeBytes = 28_000_000L
             ),
             CoreDescriptor(
                 versionKey = "3.4",
                 displayName = "Godot 3.4.5 Stable",
                 engineVersion = "3.4.5",
-                downloadUrl = "https://github.com/godotengine/godot/releases/download/3.4.5-stable/godot-lib.3.4.5.stable.release.arm64.zip",
+                downloadUrl = "$DEFAULT_REGISTRY_BASE_URL/core_3.4.zip",
                 sizeBytes = 27_000_000L
             ),
             CoreDescriptor(
                 versionKey = "3.3",
                 displayName = "Godot 3.3.4 Stable",
                 engineVersion = "3.3.4",
-                downloadUrl = "https://github.com/godotengine/godot/releases/download/3.3.4-stable/godot-lib.3.3.4.stable.release.arm64.zip",
+                downloadUrl = "$DEFAULT_REGISTRY_BASE_URL/core_3.3.zip",
                 sizeBytes = 26_000_000L
             ),
             CoreDescriptor(
                 versionKey = "3.2",
                 displayName = "Godot 3.2.3 Stable",
                 engineVersion = "3.2.3",
-                downloadUrl = "https://github.com/godotengine/godot/releases/download/3.2.3-stable/godot-lib.3.2.3.stable.release.arm64.zip",
+                downloadUrl = "$DEFAULT_REGISTRY_BASE_URL/core_3.2.zip",
                 sizeBytes = 25_000_000L
             )
         )
+
+        /**
+         * Compares two engine version keys in descending order (e.g. 4.7 > 4.5 > 4.3 > 3.6).
+         */
+        fun compareVersionsDescending(v1: String, v2: String): Int {
+            val p1 = v1.split('.').mapNotNull { it.toIntOrNull() }
+            val p2 = v2.split('.').mapNotNull { it.toIntOrNull() }
+            for (i in 0 until maxOf(p1.size, p2.size)) {
+                val num1 = p1.getOrElse(i) { 0 }
+                val num2 = p2.getOrElse(i) { 0 }
+                if (num1 != num2) {
+                    return num2.compareTo(num1)
+                }
+            }
+            return v2.compareTo(v1)
+        }
+
+        /**
+         * Merges remote catalog with builtInRegistry, ensuring no supported version is ever hidden
+         * even if not yet published to the remote registry.
+         */
+        fun mergeWithBuiltInRegistry(remote: List<CoreDescriptor>): List<CoreDescriptor> {
+            val remoteMap = remote.associateBy { it.versionKey }
+            val merged = mutableListOf<CoreDescriptor>()
+            merged.addAll(remote)
+            for (builtIn in builtInRegistry) {
+                if (!remoteMap.containsKey(builtIn.versionKey)) {
+                    merged.add(builtIn)
+                }
+            }
+            return merged.sortedWith { a, b ->
+                compareVersionsDescending(a.versionKey, b.versionKey)
+            }
+        }
 
         /**
          * Sanitizes registry base URL: trims whitespace, replaces typo 'nevilledroid' with 'nevilledev',

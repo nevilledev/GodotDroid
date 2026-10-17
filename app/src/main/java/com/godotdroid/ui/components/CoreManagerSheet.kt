@@ -304,7 +304,7 @@ fun CoreManagerSheet(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         // Quick Version Selector buttons for import
-                        val versions = listOf("4.6", "4.5", "4.4", "4.3", "4.2", "4.1", "4.0", "3.6", "3.5", "3.4", "3.3", "3.2")
+                        val versions = listOf("4.7", "4.6", "4.5", "4.4", "4.3", "4.2", "4.1", "4.0", "3.6", "3.5", "3.4", "3.3", "3.2")
                         for (v in versions) {
                             val isSel = selectedImportVersionKey == v
                             Box(
@@ -444,7 +444,8 @@ fun CoreManagerSheet(
                                 descriptor = descriptor,
                                 isInstalled = isAlreadyInstalled,
                                 isDownloading = isDownloading,
-                                onDownload = { onDownloadCore(descriptor) }
+                                onDownload = { onDownloadCore(descriptor) },
+                                onDelete = { onDeleteCore(descriptor.versionKey) }
                             )
                         }
                     }
@@ -470,7 +471,8 @@ fun CoreManagerSheet(
                                 descriptor = descriptor,
                                 isInstalled = isAlreadyInstalled,
                                 isDownloading = isDownloading,
-                                onDownload = { onDownloadCore(descriptor) }
+                                onDownload = { onDownloadCore(descriptor) },
+                                onDelete = { onDeleteCore(descriptor.versionKey) }
                             )
                         }
                     }
@@ -525,13 +527,25 @@ private fun InstalledCoreCard(
                 }
             }
 
-            IconButton(onClick = onDelete) {
+            OutlinedButton(
+                onClick = onDelete,
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = ErrorRed
+                ),
+                border = ButtonDefaults.outlinedButtonBorder.copy(
+                    brush = androidx.compose.ui.graphics.SolidColor(ErrorRed.copy(alpha = 0.7f))
+                ),
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                modifier = Modifier.height(32.dp)
+            ) {
                 Icon(
                     imageVector = Icons.Default.Delete,
-                    contentDescription = "Delete Core",
-                    tint = ErrorRed.copy(alpha = 0.7f),
-                    modifier = Modifier.size(18.dp)
+                    contentDescription = "Remove Core",
+                    modifier = Modifier.size(14.dp)
                 )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Remove", fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -542,7 +556,8 @@ private fun RegistryCoreCard(
     descriptor: CoreDescriptor,
     isInstalled: Boolean,
     isDownloading: Boolean,
-    onDownload: () -> Unit
+    onDownload: () -> Unit,
+    onDelete: (() -> Unit)? = null
 ) {
     Box(
         modifier = Modifier
@@ -586,12 +601,28 @@ private fun RegistryCoreCard(
             }
 
             if (isInstalled) {
-                Text(
-                    text = "Installed",
-                    color = SuccessGreen,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "Installed ✓",
+                        color = SuccessGreen,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    if (onDelete != null) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        IconButton(
+                            onClick = onDelete,
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = "Delete Core",
+                                tint = ErrorRed.copy(alpha = 0.8f),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
             } else if (descriptor.downloadUrl.isBlank()) {
                 Text(
                     text = "Not in registry",
