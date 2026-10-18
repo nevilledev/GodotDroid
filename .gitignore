@@ -8,3 +8,14 @@
 .cxx
 *.apk
 *.aab
+
+# Local debug dumps & reverse-engineering scratchpad
+/scratch/
+/device_*
+/tombstone_*
+/godot-lib-*.dex
+/*.bin
+/*.dex
+/*.pb
+/*.so
+/*.png
