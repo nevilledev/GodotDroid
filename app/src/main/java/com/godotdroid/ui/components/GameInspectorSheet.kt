@@ -56,6 +56,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Extension
+import java.io.File
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.runtime.getValue
@@ -80,6 +86,7 @@ import com.godotdroid.ui.theme.WarningAmber
 @Composable
 fun GameInspectorSheet(
     game: SavedGameItem,
+    companionFiles: List<File> = emptyList(),
     sheetState: SheetState,
     onDismiss: () -> Unit,
     onRendererSelected: (RendererType) -> Unit,
@@ -87,8 +94,18 @@ fun GameInspectorSheet(
     onLaunchGame: (preset: String, injectSteamStub: Boolean) -> Unit,
     onExportApk: () -> Unit,
     onDeleteGame: () -> Unit,
+    onAddCompanionFiles: (List<Uri>) -> Unit = {},
+    onRemoveCompanionFile: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val companionPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (!uris.isNullOrEmpty()) {
+            onAddCompanionFiles(uris)
+        }
+    }
+
     var selectedPreset by remember(game.id) {
         mutableStateOf(DefaultControlPresets.PRESET_PC_KEYBOARD)
     }
@@ -492,6 +509,108 @@ fun GameInspectorSheet(
                 }
             }
 
+            // Companion Resource Packs & Native Libraries Card
+            Spacer(modifier = Modifier.height(20.dp))
+            Text(
+                text = "COMPANION RESOURCE PACKS & LIBRARIES (${companionFiles.size})",
+                color = TextTertiaryDark,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Secondary .pck packs (DLCs, mods) and companion libraries loaded alongside this game",
+                color = TextSecondaryDark,
+                fontSize = 12.sp
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(SurfaceCardDark)
+                    .border(1.dp, SurfaceVariantDark, RoundedCornerShape(10.dp))
+                    .padding(14.dp)
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (companionFiles.isEmpty()) {
+                        Text(
+                            text = "No companion packs attached.\nIf this game requires secondary packs (e.g. love.pck, DLCs) or companion .so/.dll libraries, tap below to attach them.",
+                            color = TextSecondaryDark,
+                            fontSize = 12.sp,
+                            lineHeight = 16.sp
+                        )
+                    } else {
+                        companionFiles.forEach { file ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(SurfaceVariantDark.copy(alpha = 0.5f))
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Extension,
+                                        contentDescription = null,
+                                        tint = AccentCyan,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column {
+                                        Text(
+                                            text = file.name,
+                                            color = TextPrimaryDark,
+                                            fontSize = 12.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Text(
+                                            text = formatCompanionFileSize(file.length()),
+                                            color = TextSecondaryDark,
+                                            fontSize = 10.sp
+                                        )
+                                    }
+                                }
+
+                                IconButton(
+                                    onClick = { onRemoveCompanionFile(file.name) },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = "Delete",
+                                        tint = ErrorRed.copy(alpha = 0.8f),
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+                    OutlinedButton(
+                        onClick = { companionPickerLauncher.launch(arrayOf("*/*")) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = AccentCyan),
+                        border = ButtonDefaults.outlinedButtonBorder.copy(
+                            brush = androidx.compose.ui.graphics.SolidColor(AccentCyan.copy(alpha = 0.5f))
+                        )
+                    ) {
+                        Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(text = "Add Companion Pack (.pck / .dll / .so)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+
             Spacer(modifier = Modifier.height(20.dp))
 
             // Touch Controls Preset Selector
@@ -791,4 +910,11 @@ private fun PluginItemCard(plugin: com.godotdroid.pck.model.PluginDependency) {
             )
         }
     }
+}
+
+private fun formatCompanionFileSize(bytes: Long): String {
+    if (bytes <= 0) return "0 B"
+    val units = arrayOf("B", "KB", "MB", "GB")
+    val digitGroups = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt().coerceIn(0, units.size - 1)
+    return String.format(java.util.Locale.US, "%.1f %s", bytes / Math.pow(1024.0, digitGroups.toDouble()), units[digitGroups])
 }

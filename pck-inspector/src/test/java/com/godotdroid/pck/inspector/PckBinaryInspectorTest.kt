@@ -42,14 +42,14 @@ class PckBinaryInspectorTest {
         // 0x14: Reserved 64 bytes (64) -> ends at 0x54 (84)
         // 0x54: Directory:
         //   - fileCount = 1 (4)
-        //   - pathLength = 19 (4)
-        //   - paddedPath (paddedPathLen)
+        //   - pathLength = 17 (4)
+        //   - path (pathBytes.size, unpadded in Godot 3 Format 1)
         //   - rawOffset (8)
         //   - size (8)
         //   - md5 (16)
         // Data follows directory
         val headerSize = 84
-        val dirHeaderSize = 4 + 4 + paddedPathLen + 8 + 8 + 16
+        val dirHeaderSize = 4 + 4 + pathBytes.size + 8 + 8 + 16
         val dataOffset = (headerSize + dirHeaderSize).toLong()
 
         val totalSize = dataOffset + fileBytes.size
@@ -65,12 +65,10 @@ class PckBinaryInspectorTest {
 
         assertEquals(0x54, bb.position())
 
-        // Directory
+        // Directory (unpadded in Godot 3)
         bb.putInt(1) // 1 file
         bb.putInt(pathBytes.size)
         bb.put(pathBytes)
-        val padCount = paddedPathLen - pathBytes.size
-        if (padCount > 0) bb.put(ByteArray(padCount))
 
         bb.putLong(dataOffset) // rawOffset
         bb.putLong(fileBytes.size.toLong()) // size
@@ -411,10 +409,9 @@ class PckBinaryInspectorTest {
         val fileBytes = fileContent.toByteArray(Charsets.UTF_8)
         val path = "res://Main.gd"
         val pathBytes = path.toByteArray(Charsets.UTF_8)
-        val paddedPathLen = ((pathBytes.size + 3) / 4) * 4
 
         val headerSize = 84 // 20 + 64 reserved
-        val dirSize = 4 + 4 + paddedPathLen + 8 + 8 + 16
+        val dirSize = 4 + 4 + pathBytes.size + 8 + 8 + 16
         val dataOffsetInExe = pckStartOffset + headerSize + dirSize
 
         val pckSize = headerSize + dirSize + fileBytes.size
@@ -432,12 +429,10 @@ class PckBinaryInspectorTest {
         bb.putInt(0) // Patch 0
         bb.put(ByteArray(64)) // 64 bytes reserved
 
-        // Directory
+        // Directory (unpadded in Godot 3)
         bb.putInt(1) // 1 file
         bb.putInt(pathBytes.size)
         bb.put(pathBytes)
-        val pad = paddedPathLen - pathBytes.size
-        if (pad > 0) bb.put(ByteArray(pad))
         bb.putLong(dataOffsetInExe) // Absolute offset in EXE!
         bb.putLong(fileBytes.size.toLong())
         val dummyMd5 = ByteArray(16) { 0x35.toByte() }

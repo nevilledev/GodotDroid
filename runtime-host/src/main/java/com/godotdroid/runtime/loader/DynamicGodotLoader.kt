@@ -6,12 +6,17 @@ import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentActivity
 import com.godotdroid.runtime.core.InstalledCore
 import com.godotdroid.runtime.patcher.RuntimeEnvironment
 import dalvik.system.DexClassLoader
 import java.io.File
+import java.lang.reflect.Array as JavaArray
+import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
+import java.lang.reflect.UndeclaredThrowableException
 
 /**
  * Android 14+ W^X Safe Dynamic Engine Loader.
@@ -41,6 +46,7 @@ class DynamicGodotLoader(private val context: Context) {
     ): Result<IEngineInstance> {
         try {
             Log.i(TAG, "Initializing DynamicGodotLoader for Godot ${core.engineVersion}")
+            Log.i(TAG, "Godot CLI arguments: ${environment.cliArgs.joinToString(" ")}")
 
             // 1. Android 14 W^X compliance check
             if (!core.dexFile.exists() || !core.soFile.exists()) {
@@ -73,7 +79,15 @@ class DynamicGodotLoader(private val context: Context) {
                 Class.forName("org.godotengine.godot.GodotLib", true, classLoader)
                 Log.i(TAG, "GodotLib successfully loaded inside DexClassLoader namespace")
             } catch (e: Throwable) {
-                Log.w(TAG, "Note: GodotLib pre-load triggered: ${e.message}")
+                val cause = unwrapException(e)
+                Log.w(TAG, "Note: GodotLib pre-load triggered: ${cause.message}")
+            }
+
+            try {
+                installCompatHooks()
+                Log.i(TAG, "Installed anti-crash compat hooks for recursive mutexes")
+            } catch (e: Throwable) {
+                Log.d(TAG, "installCompatHooks: ${e.message}")
             }
 
             // 5. Reflectively load org.godotengine.godot.Godot
@@ -100,13 +114,15 @@ class DynamicGodotLoader(private val context: Context) {
             )
             return Result.success(instance)
         } catch (t: Throwable) {
-            Log.e(TAG, "Failed to load and initialize Godot engine", t)
-            return Result.failure(t)
+            val rootCause = unwrapException(t)
+            Log.e(TAG, "Failed to load and initialize Godot engine: ${rootCause.message}", rootCause)
+            return Result.failure(rootCause)
         }
     }
 
     /**
-     * Creates a dynamic proxy implementing org.godotengine.godot.GodotHost.
+     * Creates a dynamic proxy implementing org.godotengine.godot.GodotHost with 100% type safety.
+     * Prevents any primitive unboxing NullPointerExceptions.
      */
     fun createGodotHostProxy(
         classLoader: ClassLoader,
@@ -124,10 +140,11 @@ class DynamicGodotLoader(private val context: Context) {
             classLoader,
             arrayOf(godotHostClass)
         ) { proxy, method, args ->
+            val returnType = method.returnType
             when (method.name) {
                 "getActivity" -> activity
                 "getCommandLine" -> java.util.ArrayList(cliArgs.toList())
-                "getHostPlugins" -> emptySet<Any>()
+                "getHostPlugins" -> java.util.HashSet<Any>()
                 "getGodot" -> godotInstanceProvider()
                 "onGodotSetupCompleted" -> {
                     Log.i(TAG, "GodotHost: onGodotSetupCompleted")
@@ -139,13 +156,21 @@ class DynamicGodotLoader(private val context: Context) {
                 }
                 "onGodotForceQuit" -> {
                     Log.i(TAG, "GodotHost: onGodotForceQuit (code=${args?.getOrNull(0)})")
-                    if (method.returnType == Boolean::class.java || method.returnType == java.lang.Boolean::class.java) true else null
+                    activity.runOnUiThread {
+                        activity.finish()
+                    }
+                    if (returnType == Boolean::class.javaPrimitiveType || returnType == java.lang.Boolean::class.java) {
+                        false
+                    } else null
                 }
                 "onGodotRestart", "onGodotRestartRequested" -> {
                     Log.i(TAG, "GodotHost: onGodotRestartRequested")
                     null
                 }
                 "onNewGodotInstanceRequested" -> 0
+                "supportsFeature" -> false
+                "onEditorWorkspaceSelected" -> null
+                "signApk", "verifyApk" -> null
                 "equals" -> {
                     val other = args?.getOrNull(0)
                     proxy === other
@@ -153,11 +178,27 @@ class DynamicGodotLoader(private val context: Context) {
                 "hashCode" -> System.identityHashCode(proxy)
                 "toString" -> "GodotHostProxy[Activity=${activity.componentName}]"
                 else -> {
-                    when (method.returnType) {
-                        Boolean::class.java, java.lang.Boolean::class.java -> false
-                        Int::class.java, java.lang.Integer::class.java -> 0
-                        Void.TYPE -> null
-                        else -> null
+                    // Safe non-null primitive default return values to prevent unboxing NullPointerException
+                    when (returnType) {
+                        Boolean::class.javaPrimitiveType, java.lang.Boolean::class.java -> false
+                        Int::class.javaPrimitiveType, java.lang.Integer::class.java -> 0
+                        Long::class.javaPrimitiveType, java.lang.Long::class.java -> 0L
+                        Float::class.javaPrimitiveType, java.lang.Float::class.java -> 0f
+                        Double::class.javaPrimitiveType, java.lang.Double::class.java -> 0.0
+                        Short::class.javaPrimitiveType, java.lang.Short::class.java -> 0.toShort()
+                        Byte::class.javaPrimitiveType, java.lang.Byte::class.java -> 0.toByte()
+                        Char::class.javaPrimitiveType, java.lang.Character::class.java -> '\u0000'
+                        Void.TYPE, java.lang.Void::class.java -> null
+                        java.util.List::class.java -> java.util.ArrayList<Any>()
+                        java.util.Set::class.java -> java.util.HashSet<Any>()
+                        java.util.Map::class.java -> java.util.HashMap<Any, Any>()
+                        else -> {
+                            if (returnType.isArray && returnType.componentType != null) {
+                                JavaArray.newInstance(returnType.componentType!!, 0)
+                            } else {
+                                null
+                            }
+                        }
                     }
                 }
             }
@@ -186,28 +227,40 @@ class DynamicGodotLoader(private val context: Context) {
 
         // In Godot 4.3+: constructor is Godot(Context) or Godot(Activity)
         try {
-            val constructor = godotClass.getConstructor(Context::class.java)
+            val constructor = godotClass.getDeclaredConstructor(Context::class.java)
+            constructor.isAccessible = true
             godotInstance = constructor.newInstance(activity)
-        } catch (_: Exception) {
+            Log.i(TAG, "Instantiated Godot with Godot(Context) constructor")
+        } catch (e: Exception) {
+            val u = unwrapException(e)
+            Log.d(TAG, "Godot(Context) constructor not available: ${u.message}")
             try {
-                val constructor = godotClass.getConstructor(Activity::class.java)
+                val constructor = godotClass.getDeclaredConstructor(Activity::class.java)
+                constructor.isAccessible = true
                 godotInstance = constructor.newInstance(activity)
-            } catch (_: Exception) {
+                Log.i(TAG, "Instantiated Godot with Godot(Activity) constructor")
+            } catch (e2: Exception) {
                 if (godotHostClass != null && godotHostProxy != null) {
                     try {
-                        val constructor = godotClass.getConstructor(godotHostClass)
+                        val constructor = godotClass.getDeclaredConstructor(godotHostClass)
+                        constructor.isAccessible = true
                         godotInstance = constructor.newInstance(godotHostProxy)
+                        Log.i(TAG, "Instantiated Godot with Godot(GodotHost) constructor")
                     } catch (_: Exception) {
                         try {
-                            val constructor = godotClass.getConstructor(Activity::class.java, godotHostClass)
+                            val constructor = godotClass.getDeclaredConstructor(Activity::class.java, godotHostClass)
+                            constructor.isAccessible = true
                             godotInstance = constructor.newInstance(activity, godotHostProxy)
+                            Log.i(TAG, "Instantiated Godot with Godot(Activity, GodotHost) constructor")
                         } catch (_: Exception) {}
                     }
                 }
                 if (godotInstance == null) {
                     try {
-                        val defaultConstructor = godotClass.getConstructor()
+                        val defaultConstructor = godotClass.getDeclaredConstructor()
+                        defaultConstructor.isAccessible = true
                         godotInstance = defaultConstructor.newInstance()
+                        Log.i(TAG, "Instantiated Godot with default constructor")
                     } catch (_: Exception) {}
                 }
             }
@@ -219,6 +272,7 @@ class DynamicGodotLoader(private val context: Context) {
 
         var renderView: View? = null
         var godotHostLayout: FrameLayout? = null
+        var fragmentAttached = false
 
         // Check for Godot 4.x GodotHost lifecycle methods
         val onCreateMethod = godotClass.methods.find {
@@ -231,15 +285,31 @@ class DynamicGodotLoader(private val context: Context) {
         }
 
         if (onCreateMethod != null && godotHostProxy != null) {
+            Log.i(TAG, "Godot CLI arguments (${cliArgs.size}): ${cliArgs.joinToString(" ")}")
             Log.i(TAG, "Invoking Godot.onCreate(GodotHost)")
             onCreateMethod.isAccessible = true
-            onCreateMethod.invoke(godotInstance, godotHostProxy)
+            try {
+                onCreateMethod.invoke(godotInstance, godotHostProxy)
+            } catch (e: Throwable) {
+                val cause = unwrapException(e)
+                Log.e(TAG, "Godot.onCreate(GodotHost) failed: ${cause.message}", cause)
+                throw cause
+            }
 
             if (onInitNativeLayerMethod != null) {
                 Log.i(TAG, "Invoking Godot.onInitNativeLayer(GodotHost)")
                 onInitNativeLayerMethod.isAccessible = true
-                val nativeSuccess = onInitNativeLayerMethod.invoke(godotInstance, godotHostProxy) as? Boolean ?: true
+                val nativeSuccess = try {
+                    onInitNativeLayerMethod.invoke(godotInstance, godotHostProxy) as? Boolean ?: true
+                } catch (e: Throwable) {
+                    val cause = unwrapException(e)
+                    Log.e(TAG, "Godot.onInitNativeLayer(GodotHost) failed: ${cause.message}", cause)
+                    throw cause
+                }
                 Log.i(TAG, "Godot native layer initialization result: $nativeSuccess")
+                if (!nativeSuccess) {
+                    throw IllegalStateException("Godot native layer initialization failed (onInitNativeLayer returned false)")
+                }
             }
 
             // Step C: onInitRenderView(GodotHost) or onInitRenderView(GodotHost, FrameLayout)
@@ -247,13 +317,13 @@ class DynamicGodotLoader(private val context: Context) {
                 it.name == "onInitRenderView" && !it.name.contains("$") &&
                         it.parameterTypes.size == 1 &&
                         godotHostClass != null &&
-                        it.parameterTypes[0].isAssignableFrom(godotHostClass!!)
+                        it.parameterTypes[0].isAssignableFrom(godotHostClass)
             }
             val onInitRenderViewWithContainer = godotClass.methods.find {
                 it.name == "onInitRenderView" && !it.name.contains("$") &&
                         it.parameterTypes.size == 2 &&
                         godotHostClass != null &&
-                        it.parameterTypes[0].isAssignableFrom(godotHostClass!!) &&
+                        it.parameterTypes[0].isAssignableFrom(godotHostClass) &&
                         FrameLayout::class.java.isAssignableFrom(it.parameterTypes[1])
             }
 
@@ -262,8 +332,8 @@ class DynamicGodotLoader(private val context: Context) {
                     Log.i(TAG, "Invoking Godot.onInitRenderView(GodotHost)")
                     onInitRenderViewHostOnly.isAccessible = true
                     godotHostLayout = onInitRenderViewHostOnly.invoke(godotInstance, godotHostProxy) as? FrameLayout
-                } catch (e: Exception) {
-                    val cause = (e as? java.lang.reflect.InvocationTargetException)?.targetException ?: e
+                } catch (e: Throwable) {
+                    val cause = unwrapException(e)
                     Log.w(TAG, "onInitRenderView(host) note: ${cause.javaClass.simpleName}: ${cause.message}", cause)
                 }
             } else if (onInitRenderViewWithContainer != null) {
@@ -272,91 +342,188 @@ class DynamicGodotLoader(private val context: Context) {
                     onInitRenderViewWithContainer.isAccessible = true
                     val freshLayout = FrameLayout(activity)
                     godotHostLayout = onInitRenderViewWithContainer.invoke(godotInstance, godotHostProxy, freshLayout) as? FrameLayout ?: freshLayout
-                } catch (e: Exception) {
-                    val cause = (e as? java.lang.reflect.InvocationTargetException)?.targetException ?: e
+                } catch (e: Throwable) {
+                    val cause = unwrapException(e)
                     Log.w(TAG, "onInitRenderView(host, layout) note: ${cause.javaClass.simpleName}: ${cause.message}", cause)
                 }
             }
-
-            if (godotHostLayout != null && godotHostLayout !== container) {
-                val parent = godotHostLayout.parent as? ViewGroup
-                if (parent != container) {
-                    parent?.removeView(godotHostLayout)
-                    container.addView(
-                        godotHostLayout,
-                        0,
-                        FrameLayout.LayoutParams(
-                            FrameLayout.LayoutParams.MATCH_PARENT,
-                            FrameLayout.LayoutParams.MATCH_PARENT
-                        )
-                    )
-                }
-            }
         } else {
-            // Godot 3.x / legacy 4.0 init
-            val initMethod = findInitMethod(godotClass)
-            if (initMethod != null) {
+            // Godot 3.x Fragment-based architecture
+            Log.i(TAG, "Initializing Godot 3 runtime for ${godotClass.name}")
+
+            // 1. Inject godotHost field on Fragment if available
+            if (godotHostProxy != null) {
                 try {
-                    initMethod.isAccessible = true
-                    val paramTypes = initMethod.parameterTypes
-                    when (paramTypes.size) {
-                        2 -> {
-                            if (godotHostClass != null && paramTypes[0].isAssignableFrom(godotHostClass)) {
-                                initMethod.invoke(godotInstance, godotHostProxy, cliArgs)
-                            } else if (paramTypes[1] == Array<String>::class.java) {
-                                initMethod.invoke(godotInstance, activity, cliArgs)
-                            } else if (paramTypes[1] == java.util.List::class.java) {
-                                initMethod.invoke(godotInstance, activity, java.util.ArrayList(cliArgs.toList()))
-                            }
-                        }
-                        1 -> {
-                            if (godotHostClass != null && paramTypes[0].isAssignableFrom(godotHostClass)) {
-                                initMethod.invoke(godotInstance, godotHostProxy)
-                            } else if (paramTypes[0] == Array<String>::class.java) {
-                                initMethod.invoke(godotInstance, cliArgs)
-                            } else if (paramTypes[0] == java.util.List::class.java) {
-                                initMethod.invoke(godotInstance, java.util.ArrayList(cliArgs.toList()))
-                            }
+                    val hostField = godotClass.getDeclaredField("godotHost")
+                    hostField.isAccessible = true
+                    hostField.set(godotInstance, godotHostProxy)
+                    Log.i(TAG, "Injected godotHostProxy into Godot 3 Fragment")
+                } catch (_: Exception) {}
+            }
+
+            // 2. Inject command_line field on Fragment
+            try {
+                val cmdField = godotClass.getDeclaredField("command_line")
+                cmdField.isAccessible = true
+                cmdField.set(godotInstance, cliArgs)
+                Log.i(TAG, "Injected cliArgs into Godot 3 Fragment: ${cliArgs.joinToString(" ")}")
+            } catch (_: Exception) {}
+
+            if (activity is FragmentActivity && godotInstance is Fragment) {
+                try {
+                    if (container.id == View.NO_ID) {
+                        container.id = View.generateViewId()
+                    }
+                    Log.i(TAG, "Attaching Godot 3 Fragment to SupportFragmentManager in container #${container.id}")
+                    activity.supportFragmentManager.beginTransaction()
+                        .replace(container.id, godotInstance)
+                        .commitNowAllowingStateLoss()
+                    fragmentAttached = true
+                    Log.i(TAG, "Godot 3 Fragment attached and committed synchronously via SupportFragmentManager")
+
+                    val fragView = godotInstance.view
+                    if (fragView != null) {
+                        renderView = fragView
+                        if (fragView is FrameLayout) {
+                            godotHostLayout = fragView
                         }
                     }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Could not invoke legacy init method on Godot: ${e.message}")
+                } catch (t: Throwable) {
+                    val cause = unwrapException(t)
+                    Log.w(TAG, "SupportFragmentManager attachment note: ${cause.message}", cause)
                 }
             }
 
-            val godotLibClass = try {
-                classLoader.loadClass("org.godotengine.godot.GodotLib")
-            } catch (_: ClassNotFoundException) {
-                null
+            // Fallback if not attached via SupportFragmentManager
+            if (!fragmentAttached) {
+                val godotLibClass = try {
+                    classLoader.loadClass("org.godotengine.godot.GodotLib")
+                } catch (_: ClassNotFoundException) {
+                    null
+                }
+
+                if (godotLibClass != null) {
+                    try {
+                        val libInit = godotLibClass.methods.find { it.name == "initialize" }
+                        if (libInit != null) {
+                            libInit.isAccessible = true
+                            when (libInit.parameterTypes.size) {
+                                8 -> {
+                                    val ioClass = classLoader.loadClass("org.godotengine.godot.GodotIO")
+                                    val ioCtor = ioClass.getDeclaredConstructor(Activity::class.java).apply { isAccessible = true }
+                                    val io = ioCtor.newInstance(activity)
+                                    val netClass = classLoader.loadClass("org.godotengine.godot.utils.GodotNetUtils")
+                                    val netCtor = netClass.getDeclaredConstructor(Activity::class.java).apply { isAccessible = true }
+                                    val net = netCtor.newInstance(activity)
+                                    val dirClass = classLoader.loadClass("org.godotengine.godot.io.directory.DirectoryAccessHandler")
+                                    val dirCtor = dirClass.getDeclaredConstructor(Context::class.java).apply { isAccessible = true }
+                                    val dir = dirCtor.newInstance(activity)
+                                    val fileClass = classLoader.loadClass("org.godotengine.godot.io.file.FileAccessHandler")
+                                    val fileCtor = fileClass.getDeclaredConstructor(Context::class.java).apply { isAccessible = true }
+                                    val file = fileCtor.newInstance(activity)
+                                    libInit.invoke(null, activity, godotInstance, activity.assets, io, net, dir, file, false)
+                                    Log.i(TAG, "GodotLib.initialize(8 params) invoked successfully for Godot 3 runtime")
+                                }
+                                3 -> libInit.invoke(null, activity, activity.assets, false)
+                                2 -> libInit.invoke(null, activity, activity.assets)
+                                1 -> libInit.invoke(null, activity)
+                            }
+                        }
+                    } catch (e: Throwable) {
+                        val cause = unwrapException(e)
+                        Log.w(TAG, "GodotLib.initialize() fallback note: ${cause.message}", cause)
+                    }
+                }
+
+                try {
+                    val onAttachMethod = godotClass.methods.find {
+                        it.name == "onAttach" && it.parameterTypes.size == 1 &&
+                                (it.parameterTypes[0].isAssignableFrom(Activity::class.java) ||
+                                 it.parameterTypes[0].isAssignableFrom(Context::class.java))
+                    }
+                    onAttachMethod?.let {
+                        it.isAccessible = true
+                        it.invoke(godotInstance, activity)
+                        Log.i(TAG, "Godot 3 fallback: onAttach(Activity) invoked")
+                    }
+
+                    val onCreateBundleMethod = godotClass.methods.find {
+                        it.name == "onCreate" && it.parameterTypes.size == 1 &&
+                                android.os.Bundle::class.java.isAssignableFrom(it.parameterTypes[0])
+                    }
+                    onCreateBundleMethod?.let {
+                        it.isAccessible = true
+                        it.invoke(godotInstance, android.os.Bundle())
+                        Log.i(TAG, "Godot 3 fallback: onCreate(Bundle) invoked")
+                    }
+
+                    val onCreateViewMethod = godotClass.methods.find {
+                        it.name == "onCreateView" && it.parameterTypes.size == 3
+                    }
+                    if (onCreateViewMethod != null) {
+                        onCreateViewMethod.isAccessible = true
+                        val viewResult = onCreateViewMethod.invoke(godotInstance, activity.layoutInflater, container, null)
+                        Log.i(TAG, "Godot 3 fallback: onCreateView returned: $viewResult")
+                        if (viewResult is View) {
+                            renderView = viewResult
+                            if (viewResult is FrameLayout) {
+                                godotHostLayout = viewResult
+                            }
+                        }
+                    }
+
+                    val onStartMethod = godotClass.methods.find { it.name == "onStart" && it.parameterTypes.isEmpty() }
+                    onStartMethod?.let {
+                        it.isAccessible = true
+                        it.invoke(godotInstance)
+                    }
+
+                    val onResumeMethod = godotClass.methods.find { it.name == "onResume" && it.parameterTypes.isEmpty() }
+                    onResumeMethod?.let {
+                        it.isAccessible = true
+                        it.invoke(godotInstance)
+                    }
+                } catch (e: Throwable) {
+                    val cause = unwrapException(e)
+                    Log.w(TAG, "Godot 3 Fragment lifecycle note: ${cause.message}", cause)
+                }
             }
 
-            // In Godot 3.x, initialize GodotLib with Activity & Assets, and pass command line
-            if (godotLibClass != null) {
+            // Extract containerLayout field if not yet resolved
+            if (godotHostLayout == null) {
                 try {
-                    val libInit = godotLibClass.methods.find { it.name == "initialize" }
-                    if (libInit != null) {
-                        libInit.isAccessible = true
-                        when (libInit.parameterTypes.size) {
-                            3 -> libInit.invoke(null, activity, activity.assets, false)
-                            2 -> libInit.invoke(null, activity, activity.assets)
-                            1 -> libInit.invoke(null, activity)
-                        }
-                        Log.i(TAG, "GodotLib.initialize() invoked for Godot 3 runtime")
+                    val clField = godotClass.getDeclaredField("containerLayout").apply { isAccessible = true }
+                    val cl = clField.get(godotInstance) as? FrameLayout
+                    if (cl != null) {
+                        Log.i(TAG, "Found Godot 3 containerLayout field: $cl")
+                        godotHostLayout = cl
                     }
-                } catch (e: Exception) {
-                    Log.w(TAG, "GodotLib.initialize() note: ${e.message}")
-                }
+                } catch (_: Exception) {}
+            }
 
-                try {
-                    val setupMethod = godotLibClass.methods.find { it.name == "setup" && it.parameterTypes.size == 1 }
-                    if (setupMethod != null) {
-                        setupMethod.isAccessible = true
-                        setupMethod.invoke(null, cliArgs)
-                        Log.i(TAG, "GodotLib.setup(cliArgs) invoked for Godot 3 runtime")
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "GodotLib.setup() note: ${e.message}")
+            // Extract mView (GodotView / GLSurfaceView) if available for accurate touch dispatch
+            try {
+                val mViewField = godotClass.getDeclaredField("mView").apply { isAccessible = true }
+                val godotView = mViewField.get(godotInstance) as? View
+                if (godotView != null) {
+                    Log.i(TAG, "Found Godot 3 mView (GodotView): $godotView")
+                    renderView = godotView
                 }
+            } catch (_: Exception) {}
+        }
+
+        if (godotHostLayout != null && godotHostLayout !== container) {
+            val parent = godotHostLayout.parent as? ViewGroup
+            if (parent != container) {
+                parent?.removeView(godotHostLayout)
+                container.addView(
+                    godotHostLayout,
+                    0,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
+                    )
+                )
             }
         }
 
@@ -425,6 +592,12 @@ class DynamicGodotLoader(private val context: Context) {
             }
         }
 
+        renderView?.apply {
+            isFocusable = true
+            isFocusableInTouchMode = true
+            requestFocus()
+        }
+
         fun invokeEngineLifecycle(methodName: String) {
             val method = godotClass.methods.find { m ->
                 m.name == methodName && (
@@ -440,8 +613,9 @@ class DynamicGodotLoader(private val context: Context) {
                     } else if (godotHostProxy != null) {
                         method.invoke(godotInstance, godotHostProxy)
                     }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Error invoking $methodName: ${e.message}")
+                } catch (e: Throwable) {
+                    val cause = unwrapException(e)
+                    Log.w(TAG, "Error invoking $methodName: ${cause.message}", cause)
                 }
             }
         }
@@ -451,33 +625,33 @@ class DynamicGodotLoader(private val context: Context) {
             override val classLoader: ClassLoader get() = classLoader
 
             override fun onStart() {
-                invokeEngineLifecycle("onStart")
+                if (!fragmentAttached) {
+                    invokeEngineLifecycle("onStart")
+                }
             }
 
             override fun onResume() {
-                invokeEngineLifecycle("onResume")
-                try {
-                    val godotLibClass = classLoader.loadClass("org.godotengine.godot.GodotLib")
-                    val focusIn = godotLibClass.methods.find { it.name == "focusin" && it.parameterTypes.isEmpty() }
-                    focusIn?.invoke(null)
-                } catch (_: Exception) {}
+                if (!fragmentAttached) {
+                    invokeEngineLifecycle("onResume")
+                }
             }
 
             override fun onPause() {
-                try {
-                    val godotLibClass = classLoader.loadClass("org.godotengine.godot.GodotLib")
-                    val focusOut = godotLibClass.methods.find { it.name == "focusout" && it.parameterTypes.isEmpty() }
-                    focusOut?.invoke(null)
-                } catch (_: Exception) {}
-                invokeEngineLifecycle("onPause")
+                if (!fragmentAttached) {
+                    invokeEngineLifecycle("onPause")
+                }
             }
 
             override fun onStop() {
-                invokeEngineLifecycle("onStop")
+                if (!fragmentAttached) {
+                    invokeEngineLifecycle("onStop")
+                }
             }
 
             override fun onDestroy() {
-                invokeEngineLifecycle("onDestroy")
+                if (!fragmentAttached) {
+                    invokeEngineLifecycle("onDestroy")
+                }
             }
 
             override fun onBackPressed(): Boolean {
@@ -498,26 +672,44 @@ class DynamicGodotLoader(private val context: Context) {
     }
 
     private fun patchGodotRClasses(classLoader: ClassLoader, context: Context) {
-        val rSubClasses = listOf("dimen", "string", "id", "layout", "style", "xml")
-        for (subName in rSubClasses) {
-            try {
-                val rClass = classLoader.loadClass("org.godotengine.godot.R\$$subName")
-                for (field in rClass.fields) {
-                    val fieldName = field.name
-                    val resId = context.resources.getIdentifier(fieldName, subName, context.packageName)
-                    if (resId != 0) {
-                        try {
-                            field.isAccessible = true
-                            field.setInt(null, resId)
-                            Log.d(TAG, "Patched Godot R.$subName.$fieldName -> 0x${Integer.toHexString(resId)}")
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Failed to set R.$subName.$fieldName: ${e.message}")
+        val rSubClasses = listOf("dimen", "string", "id", "layout", "style", "xml", "mipmap")
+        val fallbackStringId = try {
+            val okId = context.resources.getIdentifier("dialog_ok", "string", context.packageName)
+            if (okId != 0) okId else android.R.string.ok
+        } catch (_: Exception) {
+            android.R.string.ok
+        }
+
+        val packagePrefixes = listOf("org.godotengine.godot.R", "com.godot.game.R")
+        for (pkg in packagePrefixes) {
+            for (subName in rSubClasses) {
+                try {
+                    val rClass = classLoader.loadClass("$pkg\$$subName")
+                    for (field in rClass.fields) {
+                        val fieldName = field.name
+                        val resId = context.resources.getIdentifier(fieldName, subName, context.packageName)
+                        field.isAccessible = true
+                        if (resId != 0) {
+                            try {
+                                field.setInt(null, resId)
+                                Log.d(TAG, "Patched $pkg.$subName.$fieldName -> 0x${Integer.toHexString(resId)}")
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Failed to set $pkg.$subName.$fieldName: ${e.message}")
+                            }
+                        } else if (subName == "string") {
+                            // Fallback to safe valid string resource ID so Resources$NotFoundException can never be thrown
+                            try {
+                                field.setInt(null, fallbackStringId)
+                                Log.d(TAG, "Fallback patched $pkg.string.$fieldName -> 0x${Integer.toHexString(fallbackStringId)}")
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Failed to fallback set $pkg.string.$fieldName: ${e.message}")
+                            }
                         }
                     }
+                } catch (_: ClassNotFoundException) {
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error inspecting $pkg.$subName: ${e.message}")
                 }
-            } catch (_: ClassNotFoundException) {
-            } catch (e: Exception) {
-                Log.w(TAG, "Error inspecting R.$subName: ${e.message}")
             }
         }
     }
@@ -536,5 +728,46 @@ class DynamicGodotLoader(private val context: Context) {
 
     companion object {
         private const val TAG = "DynamicGodotLoader"
+
+        init {
+            try {
+                System.loadLibrary("godot_compat")
+                Log.i(TAG, "Loaded libgodot_compat.so via companion init")
+            } catch (e: Throwable) {
+                Log.d(TAG, "libgodot_compat.so not yet loaded: ${e.message}")
+            }
+        }
+
+        @JvmStatic
+        external fun installCompatHooks()
+
+        /**
+         * Recursively unwraps reflection and wrapper exceptions (InvocationTargetException,
+         * UndeclaredThrowableException, etc.) to expose the true root cause.
+         */
+        fun unwrapException(t: Throwable): Throwable {
+            var current: Throwable = t
+            while (true) {
+                val next = when (current) {
+                    is InvocationTargetException -> current.targetException ?: current.cause
+                    is UndeclaredThrowableException -> current.undeclaredThrowable ?: current.cause
+                    else -> current.cause
+                }
+                if (next != null && next !== current) {
+                    current = next
+                } else {
+                    break
+                }
+            }
+            return current
+        }
+
+        fun formatExceptionMessage(t: Throwable): String {
+            val unwrapped = unwrapException(t)
+            val msg = unwrapped.message?.takeIf { it.isNotBlank() }
+                ?: unwrapped.localizedMessage?.takeIf { it.isNotBlank() }
+                ?: unwrapped.javaClass.simpleName
+            return "${unwrapped.javaClass.simpleName}: $msg"
+        }
     }
 }

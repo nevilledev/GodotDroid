@@ -107,11 +107,13 @@ fun GameLibraryScreen(
     var promptInstallData by remember { mutableStateOf<UiEvent.PromptCoreInstall?>(null) }
     var gameToExport by remember { mutableStateOf<SavedGameItem?>(null) }
 
-    // SAF File Picker for Games (.exe, .pck)
+    // SAF Multi-File Picker for Games (.exe, .pck, and companion packs)
     val openDocumentLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        uri?.let { viewModel.importGame(it) }
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (!uris.isNullOrEmpty()) {
+            viewModel.importGames(uris)
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -276,6 +278,7 @@ fun GameLibraryScreen(
             selectedGame?.let { game ->
                 GameInspectorSheet(
                     game = game,
+                    companionFiles = viewModel.getCompanionFiles(game),
                     sheetState = sheetState,
                     onDismiss = { viewModel.selectGame(null) },
                     onRendererSelected = { renderer ->
@@ -286,7 +289,9 @@ fun GameLibraryScreen(
                         viewModel.launchGame(context, game, preset, injectSteamStub)
                     },
                     onExportApk = { gameToExport = game },
-                    onDeleteGame = { viewModel.deleteGame(game) }
+                    onDeleteGame = { viewModel.deleteGame(game) },
+                    onAddCompanionFiles = { uris -> viewModel.addCompanionFiles(game, uris) },
+                    onRemoveCompanionFile = { fileName -> viewModel.removeCompanionFile(game, fileName) }
                 )
             }
 

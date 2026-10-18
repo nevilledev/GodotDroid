@@ -196,4 +196,302 @@ class PckVirtualPatcherTest {
         val extractedSteamBytes = inspector.extractFileBytes(patchedPck, steamEntry!!)
         assertArrayEquals(steamBytes, extractedSteamBytes)
     }
+
+    @Test
+    fun testPatchFormatV2_WithAlignedFileBase_AndVersionClamping() {
+        // 1. Build synthetic PCK Format v2 where fileBase is aligned to 256 bytes
+        val scriptContent = "extends Node\nfunc _ready():\n    print(\"Hello world\")\n"
+        val scriptBytes = scriptContent.toByteArray(Charsets.UTF_8)
+        val scriptPath = "res://main.gd"
+        val scriptPathBytes = scriptPath.toByteArray(Charsets.UTF_8)
+        val paddedPathLen = ((scriptPathBytes.size + 3) / 4) * 4
+
+        val headerSize = 96
+        val dirSize = 4 + (4 + paddedPathLen + 8 + 8 + 16 + 4)
+        val fileBase = 256L // Deliberately pad 256 - (96 + dirSize) bytes between dir and payload
+        assertTrue(fileBase > headerSize + dirSize)
+        assertEquals(0L, fileBase % 8L) // 8-byte aligned
+
+        val totalSize = (fileBase + scriptBytes.size).toInt()
+        val bb = ByteBuffer.allocate(totalSize).order(ByteOrder.LITTLE_ENDIAN)
+
+        // Header v2 with Godot 4.5.0
+        bb.putInt(PckConstants.PCK_MAGIC)
+        bb.putInt(2) // v2
+        bb.putInt(4) // major = 4
+        bb.putInt(5) // minor = 5
+        bb.putInt(0) // patch = 0
+        bb.putInt(PckConstants.PACK_REL_FILEBASE) // packFlags
+        bb.putLong(fileBase) // fileBase = 256
+        bb.put(ByteArray(64))
+
+        // Directory at offset 96
+        bb.putInt(1) // 1 file
+        bb.putInt(scriptPathBytes.size)
+        bb.put(scriptPathBytes)
+        val pad = paddedPathLen - scriptPathBytes.size
+        if (pad > 0) bb.put(ByteArray(pad))
+        bb.putLong(0L) // rawOffset = 0 relative to fileBase
+        bb.putLong(scriptBytes.size.toLong())
+        bb.put(ByteArray(16) { 0x33.toByte() })
+        bb.putInt(0)
+
+        // Fill padding up to fileBase
+        val dirEnd = headerSize + dirSize
+        for (i in dirEnd until fileBase.toInt()) {
+            bb.put(0.toByte())
+        }
+
+        // Payload at fileBase (256)
+        bb.position(fileBase.toInt())
+        bb.put(scriptBytes)
+
+        val originalPck = tempFolder.newFile("game_v2_aligned.pck")
+        FileOutputStream(originalPck).use { it.write(bb.array()) }
+
+        // Verify original inspect reads script correctly
+        val inspectOrig = inspector.inspect(originalPck)
+        assertEquals(4, inspectOrig.header.engineMajor)
+        assertEquals(5, inspectOrig.header.engineMinor)
+        assertEquals(fileBase, inspectOrig.header.effectiveFileBase)
+        val origScript = inspector.extractFileBytes(originalPck, inspectOrig.files.first())
+        assertArrayEquals(scriptBytes, origScript)
+
+        // 2. Patch PCK clamping to Godot 4.3 and injecting override.cfg
+        val overrideContent = "[rendering]\nrenderer/rendering_method=\"gl_compatibility\"\n"
+        val overrideBytes = overrideContent.toByteArray(Charsets.UTF_8)
+
+        val patchedPck = tempFolder.newFile("game_v2_aligned_patched.pck")
+        val patchResult = patcher.patchPck(
+            sourceFile = originalPck,
+            targetFile = patchedPck,
+            injectedFiles = mapOf("res://override.cfg" to overrideBytes),
+            targetEngineMajor = 4,
+            targetEngineMinor = 3
+        )
+
+        assertEquals(2, patchResult.totalFilesCount)
+        assertEquals(1, patchResult.injectedFilesCount)
+
+        // 3. Inspect patched PCK: verify engine version clamped to 4.3 and data extracted correctly
+        val inspectResult = inspector.inspect(patchedPck)
+        assertEquals("Engine major must be clamped to 4", 4, inspectResult.header.engineMajor)
+        assertEquals("Engine minor must be clamped to 3", 3, inspectResult.header.engineMinor)
+        assertEquals(2, inspectResult.files.size)
+
+        val extractedScript = inspector.extractFileBytes(patchedPck, inspectResult.files.find { it.path == "res://main.gd" }!!)
+        assertArrayEquals("Script payload bytes must match exactly despite alignment and dir size shift", scriptBytes, extractedScript)
+
+        val extractedOverride = inspector.extractFileBytes(patchedPck, inspectResult.files.find { it.path == "res://override.cfg" }!!)
+        assertArrayEquals("Injected override.cfg must match exactly", overrideBytes, extractedOverride)
+    }
+
+    @Test
+    fun testDirectoryTableEntryLength_MatchesGodotCppReader() {
+        // Build a PCK with paths of non-4-byte-aligned lengths
+        // e.g. path length 7 (pad 1), 10 (pad 2), 13 (pad 3), 16 (pad 0)
+        val file1Path = "res://a.txt" // len 7, padded 8, pad 1
+        val file2Path = "res://ab.txt" // len 8, padded 8, pad 0
+        val file3Path = "res://abc.txt" // len 9, padded 12, pad 3
+        val file4Path = "res://abcd.txt" // len 10, padded 12, pad 2
+
+        val content = "test data".toByteArray(Charsets.UTF_8)
+        val basePck = tempFolder.newFile("base_test.pck")
+        val bb = ByteBuffer.allocate(1024).order(ByteOrder.LITTLE_ENDIAN)
+
+        // Header v2
+        bb.putInt(PckConstants.PCK_MAGIC)
+        bb.putInt(2)
+        bb.putInt(4)
+        bb.putInt(4)
+        bb.putInt(0)
+        bb.putInt(PckConstants.PACK_REL_FILEBASE)
+        bb.putLong(512L) // fileBase = 512
+        bb.put(ByteArray(64))
+
+        // Directory: 1 file
+        bb.putInt(1)
+        val p1 = "a.txt".toByteArray(Charsets.UTF_8) // 5 bytes -> padded 8
+        bb.putInt(8)
+        bb.put(p1)
+        bb.put(ByteArray(3))
+        bb.putLong(0L) // rawOffset = 0
+        bb.putLong(content.size.toLong())
+        bb.put(ByteArray(16))
+        bb.putInt(0)
+
+        // Pad to fileBase
+        while (bb.position() < 512) bb.put(0.toByte())
+        bb.position(512)
+        bb.put(content)
+
+        FileOutputStream(basePck).use { it.write(bb.array(), 0, 512 + content.size) }
+
+        // Patch with 3 new files of odd lengths
+        val patchedPck = tempFolder.newFile("patched_alignment.pck")
+        patcher.patchPck(
+            sourceFile = basePck,
+            targetFile = patchedPck,
+            injectedFiles = mapOf(
+                file2Path to "22".toByteArray(),
+                file3Path to "333".toByteArray(),
+                file4Path to "4444".toByteArray()
+            )
+        )
+
+        // Verify with exact Godot C++ reader logic
+        java.io.RandomAccessFile(patchedPck, "r").use { raf ->
+            val ch = raf.channel
+            val headerBuf = ByteBuffer.allocate(96).order(ByteOrder.LITTLE_ENDIAN)
+            ch.read(headerBuf)
+            headerBuf.flip()
+            headerBuf.position(24) // fileBase
+            val fileBase = headerBuf.getLong()
+
+            // Dir table starts at pos 96
+            val countBuf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
+            ch.position(96L)
+            ch.read(countBuf)
+            countBuf.flip()
+            val fileCount = countBuf.getInt()
+            assertEquals(4, fileCount)
+
+            val metaBuf = ByteBuffer.allocate(36).order(ByteOrder.LITTLE_ENDIAN)
+            for (i in 0 until fileCount) {
+                val lenBuf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
+                ch.read(lenBuf)
+                lenBuf.flip()
+                val sl = lenBuf.getInt()
+                // In Godot C++, sl must be a multiple of 4
+                assertEquals("Path length sl must be 4-byte padded for Godot C++ reader", 0, sl % 4)
+
+                val strBuf = ByteBuffer.allocate(sl)
+                ch.read(strBuf)
+                strBuf.flip()
+                val pathRaw = ByteArray(sl)
+                strBuf.get(pathRaw)
+                val cleanPath = String(pathRaw, Charsets.UTF_8).trimEnd('\u0000')
+                assertTrue("Path must be non-empty and valid ASCII/UTF-8", cleanPath.isNotBlank())
+
+                // In Godot C++, metadata follows immediately without extra padding
+                metaBuf.clear()
+                ch.read(metaBuf)
+                metaBuf.flip()
+                val rawOffset = metaBuf.getLong()
+                val size = metaBuf.getLong()
+                val md5 = ByteArray(16)
+                metaBuf.get(md5)
+                val flags = metaBuf.getInt()
+
+                assertTrue("Size must be positive", size > 0)
+                assertTrue("Actual offset must be >= fileBase", rawOffset + fileBase >= fileBase)
+            }
+        }
+    }
+
+    @Test
+    fun testPatchFormatV1_Godot3_UnpaddedPathsAndMetadata32B() {
+        // 1. Build synthetic PCK Format 1 (Godot 3.5 / 3.6) with odd/unaligned path lengths
+        val scene1Path = "res://dlc/love/Maps/SexRoom/SexRoom.gd" // 38 bytes (NOT a multiple of 4!)
+        val scene1Bytes = "extends Node\nfunc _ready(): pass\n".toByteArray(Charsets.UTF_8)
+        val scene2Path = "res://dlc/love/Maps/DarkForest/Quests/DarkForestLoveQuests.gd" // 61 bytes (NOT a multiple of 4!)
+        val scene2Bytes = "# quest script\n".toByteArray(Charsets.UTF_8)
+
+        val s1PathBytes = scene1Path.removePrefix("res://").toByteArray(Charsets.UTF_8)
+        val s2PathBytes = scene2Path.removePrefix("res://").toByteArray(Charsets.UTF_8)
+
+        val headerSize = 0x54 // 84 bytes
+        // Dir size: count (4) + (4 + 38 + 32) + (4 + 61 + 32) = 4 + 74 + 97 = 175 bytes
+        val dirSize = 4 + (4 + s1PathBytes.size + 32) + (4 + s2PathBytes.size + 32)
+        val payload1Offset = (headerSize + dirSize).toLong()
+        val payload2Offset = payload1Offset + scene1Bytes.size
+
+        val totalSize = (payload2Offset + scene2Bytes.size).toInt()
+        val bb = ByteBuffer.allocate(totalSize).order(ByteOrder.LITTLE_ENDIAN)
+
+        // Header v1
+        bb.putInt(PckConstants.PCK_MAGIC)
+        bb.putInt(1) // Format v1
+        bb.putInt(3) // Major 3
+        bb.putInt(5) // Minor 5
+        bb.putInt(0) // Patch 0
+        bb.put(ByteArray(64)) // 16 * uint32 reserved
+
+        // Directory at 0x54
+        bb.putInt(2) // 2 files
+        // File 1 (unpadded path, 32B metadata)
+        bb.putInt(s1PathBytes.size)
+        bb.put(s1PathBytes)
+        bb.putLong(payload1Offset)
+        bb.putLong(scene1Bytes.size.toLong())
+        bb.put(ByteArray(16) { 0x55.toByte() })
+
+        // File 2 (unpadded path, 32B metadata)
+        bb.putInt(s2PathBytes.size)
+        bb.put(s2PathBytes)
+        bb.putLong(payload2Offset)
+        bb.putLong(scene2Bytes.size.toLong())
+        bb.put(ByteArray(16) { 0x66.toByte() })
+
+        // Payload
+        bb.put(scene1Bytes)
+        bb.put(scene2Bytes)
+
+        val originalPck = tempFolder.newFile("game_v1.pck")
+        FileOutputStream(originalPck).use { it.write(bb.array()) }
+
+        // Inspect original PCK: verify inspector parses unpadded Format 1 correctly
+        val inspectOrig = inspector.inspect(originalPck)
+        assertEquals(1, inspectOrig.header.formatVersion)
+        assertEquals(3, inspectOrig.header.engineMajor)
+        assertEquals(5, inspectOrig.header.engineMinor)
+        assertEquals(2, inspectOrig.files.size)
+        assertEquals("res://dlc/love/Maps/SexRoom/SexRoom.gd", inspectOrig.files[0].path)
+        assertEquals("res://dlc/love/Maps/DarkForest/Quests/DarkForestLoveQuests.gd", inspectOrig.files[1].path)
+
+        val extScene1 = inspector.extractFileBytes(originalPck, inspectOrig.files[0])
+        assertArrayEquals(scene1Bytes, extScene1)
+        val extScene2 = inspector.extractFileBytes(originalPck, inspectOrig.files[1])
+        assertArrayEquals(scene2Bytes, extScene2)
+
+        // 2. Patch PCK with injected files (override.cfg and companion mount script)
+        val overrideContent = "[rendering]\nquality/driver/driver_name=\"GLES2\"\n"
+        val overrideBytes = overrideContent.toByteArray(Charsets.UTF_8)
+        val mountScript = "extends Node\nfunc _init(): print(\"mounted\")\n"
+        val mountBytes = mountScript.toByteArray(Charsets.UTF_8)
+
+        val patchedPck = tempFolder.newFile("game_v1_patched.pck")
+        val patchResult = patcher.patchPck(
+            sourceFile = originalPck,
+            targetFile = patchedPck,
+            injectedFiles = mapOf(
+                "res://override.cfg" to overrideBytes,
+                "res://godotdroid_companion_mount.gd" to mountBytes
+            )
+        )
+
+        assertEquals(4, patchResult.totalFilesCount)
+        assertEquals(2, patchResult.injectedFilesCount)
+
+        // 3. Inspect patched PCK: verify all 4 files are intact
+        val inspectPatched = inspector.inspect(patchedPck)
+        assertEquals(1, inspectPatched.header.formatVersion)
+        assertEquals(4, inspectPatched.files.size)
+
+        val p1 = inspectPatched.files.find { it.path == "res://dlc/love/Maps/SexRoom/SexRoom.gd" }
+        assertNotNull(p1)
+        assertArrayEquals(scene1Bytes, inspector.extractFileBytes(patchedPck, p1!!))
+
+        val p2 = inspectPatched.files.find { it.path == "res://dlc/love/Maps/DarkForest/Quests/DarkForestLoveQuests.gd" }
+        assertNotNull(p2)
+        assertArrayEquals(scene2Bytes, inspector.extractFileBytes(patchedPck, p2!!))
+
+        val pOverride = inspectPatched.files.find { it.path == "res://override.cfg" }
+        assertNotNull(pOverride)
+        assertArrayEquals(overrideBytes, inspector.extractFileBytes(patchedPck, pOverride!!))
+
+        val pMount = inspectPatched.files.find { it.path == "res://godotdroid_companion_mount.gd" }
+        assertNotNull(pMount)
+        assertArrayEquals(mountBytes, inspector.extractFileBytes(patchedPck, pMount!!))
+    }
 }

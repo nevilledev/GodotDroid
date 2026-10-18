@@ -40,6 +40,22 @@ class PckBinaryInspector {
     }
 
     /**
+     * Inspects only the header of a PCK or EXE file without reading the directory table.
+     * Extremely fast for version checking and clamping.
+     */
+    fun inspectHeader(file: File): PckHeader {
+        if (!file.exists()) {
+            throw InvalidPckException("Target file does not exist: ${file.absolutePath}")
+        }
+        RandomAccessFile(file, "r").use { raf ->
+            val channel = raf.channel
+            val fileLength = channel.size()
+            val location = locatePckStartOffset(channel, fileLength)
+            return parseHeader(channel, location.pckStartOffset, location.isEmbeddedExe, fileLength)
+        }
+    }
+
+    /**
      * Inspects using an existing FileChannel.
      */
     fun inspect(channel: FileChannel, fileLength: Long = channel.size()): PckInspectResult {
@@ -296,10 +312,15 @@ class PckBinaryInspector {
                 throw InvalidPckException("Corrupted path length ($pathLength) for entry #$i")
             }
 
-            // Path string is padded to 4-byte boundary
-            val paddedLength = ((pathLength + 3) / 4) * 4
-            val pathBytes = ByteBuffer.allocate(paddedLength)
-            if (channel.read(pathBytes) < paddedLength) {
+            // Path string is padded to 4-byte boundary ONLY for Format v2+ (Godot 4+).
+            // Godot 3 (Format v1) writes exact unpadded string bytes.
+            val readPathLength = if (header.formatVersion >= 2) {
+                ((pathLength + 3) / 4) * 4
+            } else {
+                pathLength
+            }
+            val pathBytes = ByteBuffer.allocate(readPathLength)
+            if (channel.read(pathBytes) < readPathLength) {
                 throw InvalidPckException("Unexpected EOF reading path bytes for entry #$i")
             }
             pathBytes.flip()
@@ -438,10 +459,8 @@ class PckBinaryInspector {
                                     if (dstChannel.read(pathLenBuf) < 4) break
                                     pathLenBuf.flip()
                                     val pathLength = pathLenBuf.getInt()
-                                    val paddedLength = ((pathLength + 3) / 4) * 4
-
-                                    // Skip path bytes
-                                    dstChannel.position(dstChannel.position() + paddedLength)
+                                    // In Godot 3 (Format v1), path bytes are not padded
+                                    dstChannel.position(dstChannel.position() + pathLength)
 
                                     val offsetPos = dstChannel.position()
                                     offsetBuf.clear()

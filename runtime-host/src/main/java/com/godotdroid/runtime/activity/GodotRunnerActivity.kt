@@ -31,8 +31,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.fragment.app.FragmentActivity
 import com.godotdroid.overlay.model.DefaultControlPresets
 import com.godotdroid.pck.model.RendererType
 import com.godotdroid.runtime.core.CoreManager
@@ -48,7 +50,7 @@ import java.io.File
  * Executes the loaded Godot engine inside an immersive landscape container and terminates
  * its PID on exit to prevent native symbol collisions across engine versions.
  */
-class GodotRunnerActivity : ComponentActivity() {
+class GodotRunnerActivity : FragmentActivity() {
 
     private lateinit var rootContainer: FrameLayout
     private lateinit var coreManager: CoreManager
@@ -94,6 +96,7 @@ class GodotRunnerActivity : ComponentActivity() {
         // 2. Setup Container
         rootContainer = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
+            keepScreenOn = true
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
@@ -107,6 +110,8 @@ class GodotRunnerActivity : ComponentActivity() {
 
         performanceMonitor = PerformanceMonitor().apply { start() }
         setupInputDeviceListener()
+
+
 
         // 3. Extract Intent Arguments
         val gameId = intent.getStringExtra(EXTRA_GAME_ID) ?: ""
@@ -162,7 +167,8 @@ class GodotRunnerActivity : ComponentActivity() {
                     selectedRenderer = renderer,
                     mainSceneOverride = mainSceneOverride,
                     injectSteamStub = injectSteamStub,
-                    engineMajor = major
+                    engineMajor = major,
+                    engineMinor = minor
                 )
             }
 
@@ -173,7 +179,19 @@ class GodotRunnerActivity : ComponentActivity() {
                 classLoaderProvider = { engineInstance?.classLoader }
             )
 
-            // 7. Dynamically load and initialize Godot
+            // 7. Change working directory to runtime staging folder and initialize Godot
+            try {
+                System.setProperty("user.dir", environment.runtimeDir.absolutePath)
+                val libcoreClass = Class.forName("libcore.io.Libcore")
+                val osField = libcoreClass.getField("os")
+                val osInstance = osField.get(null)
+                val chdirMethod = osInstance.javaClass.getMethod("chdir", String::class.java)
+                chdirMethod.invoke(osInstance, environment.runtimeDir.absolutePath)
+                Log.i(TAG, "Changed process working directory to: ${environment.runtimeDir.absolutePath}")
+            } catch (e: Throwable) {
+                Log.w(TAG, "Could not chdir to ${environment.runtimeDir.absolutePath}: ${e.message}")
+            }
+
             val result = dynamicLoader.loadAndInitialize(
                 core = core,
                 environment = environment,
@@ -215,14 +233,64 @@ class GodotRunnerActivity : ComponentActivity() {
                 instance.onStart()
                 instance.onResume()
             }.onFailure { error ->
-                Log.e(TAG, "Failed to initialize Godot engine", error)
-                Toast.makeText(
-                    this@GodotRunnerActivity,
-                    "Godot initialization failed: ${error.message}",
-                    Toast.LENGTH_LONG
-                ).show()
+                val rootCause = DynamicGodotLoader.unwrapException(error)
+                Log.e(TAG, "Failed to initialize Godot engine: ${rootCause.message}", rootCause)
+                hideLoadingIndicator()
+                showInitializationErrorDialog(rootCause)
+            }
+        }
+    }
+
+    private fun showInitializationErrorDialog(error: Throwable) {
+        val rootCause = DynamicGodotLoader.unwrapException(error)
+        val stackTraceString = Log.getStackTraceString(rootCause)
+        val errorMsg = rootCause.message?.takeIf { it.isNotBlank() }
+            ?: rootCause.localizedMessage?.takeIf { it.isNotBlank() }
+            ?: rootCause.javaClass.simpleName
+
+        val nativeLogs = captureNativeLogcat()
+        val fullErrorLog = "Error: ${rootCause.javaClass.name}: $errorMsg\n\nStack Trace:\n$stackTraceString\n\n--- Native C++ Logs (Last 80 lines) ---\n$nativeLogs"
+
+        val scrollView = android.widget.ScrollView(this).apply {
+            setPadding(40, 20, 40, 20)
+        }
+        val textView = TextView(this).apply {
+            text = fullErrorLog
+            setTextIsSelectable(true)
+            textSize = 12f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextColor(Color.parseColor("#E0E0E0"))
+        }
+        scrollView.addView(textView)
+
+        val dialog = android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Engine Initialization Failed")
+            .setView(scrollView)
+            .setCancelable(false)
+            .setPositiveButton("Close") { _, _ ->
                 finish()
             }
+            .setNeutralButton("Copy Error Log") { _, _ ->
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                if (clipboard != null) {
+                    val clip = android.content.ClipData.newPlainText("GodotDroid Error Log", fullErrorLog)
+                    clipboard.setPrimaryClip(clip)
+                    Toast.makeText(this, "Error log copied to clipboard", Toast.LENGTH_SHORT).show()
+                }
+                finish()
+            }
+            .create()
+
+        dialog.show()
+    }
+
+    private fun captureNativeLogcat(): String {
+        return try {
+            val process = Runtime.getRuntime().exec(arrayOf("logcat", "-d", "-t", "80", "-s", "godot:*", "Godot:*", "GodotLib:*", "DynamicGodotLoader:*"))
+            val output = process.inputStream.bufferedReader().use { it.readText() }
+            if (output.isNotBlank()) output.trim() else "No native logcat output captured."
+        } catch (e: Exception) {
+            "Failed to capture logcat: ${e.message}"
         }
     }
 
@@ -344,10 +412,13 @@ class GodotRunnerActivity : ComponentActivity() {
 
         if (isGamepadEvent) {
             isControllerActive = true
-            if (inputBridge?.dispatchHardwareKeyEvent(event) == true) {
-                return true
-            }
         }
+
+        // Forward to input bridge first (handles physical controller, physical keyboard, and adb keyevents)
+        if (inputBridge?.dispatchHardwareKeyEvent(event) == true) {
+            return true
+        }
+
         return super.dispatchKeyEvent(event)
     }
 

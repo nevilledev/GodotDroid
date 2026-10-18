@@ -106,18 +106,66 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    fun importGame(uri: Uri) {
+    fun importGame(uri: Uri) = importGames(listOf(uri))
+
+    fun importGames(uris: List<Uri>) {
+        if (uris.isEmpty()) return
         viewModelScope.launch {
             _isImporting.value = true
-            val result = repository.importGameFromUri(uri)
+            val result = repository.importGameFromUris(uris)
             _isImporting.value = false
 
             result.onSuccess { item ->
                 _games.value = repository.getGames()
                 _selectedGame.value = item
-                _uiEvents.emit(UiEvent.ShowMessage("Successfully imported: ${item.report.gameTitle}"))
+                val companionCount = repository.getCompanionFiles(item).size
+                val msg = if (companionCount > 0) {
+                    "Successfully imported: ${item.report.gameTitle} ($companionCount companion file(s) attached)"
+                } else {
+                    "Successfully imported: ${item.report.gameTitle}"
+                }
+                _uiEvents.emit(UiEvent.ShowMessage(msg))
             }.onFailure { error ->
                 _uiEvents.emit(UiEvent.ShowMessage("Failed to import game: ${error.message}"))
+            }
+        }
+    }
+
+    fun resolveParentFolder(uri: Uri): File? {
+        return repository.resolveParentDirectory(uri)
+    }
+
+    fun getCompanionFiles(game: SavedGameItem): List<File> {
+        return repository.getCompanionFiles(game)
+    }
+
+    fun addCompanionFiles(game: SavedGameItem, uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        viewModelScope.launch {
+            val result = repository.addCompanionFiles(game.id, uris)
+            result.onSuccess {
+                _games.value = repository.getGames()
+                val updated = repository.getGames().find { it.id == game.id }
+                if (updated != null) {
+                    _selectedGame.value = updated
+                }
+                _uiEvents.emit(UiEvent.ShowMessage("Attached ${uris.size} companion file(s) to ${game.report.gameTitle}"))
+            }.onFailure { error ->
+                _uiEvents.emit(UiEvent.ShowMessage("Failed to attach companion file: ${error.message}"))
+            }
+        }
+    }
+
+    fun removeCompanionFile(game: SavedGameItem, fileName: String) {
+        viewModelScope.launch {
+            val success = repository.removeCompanionFile(game.id, fileName)
+            if (success) {
+                _games.value = repository.getGames()
+                val updated = repository.getGames().find { it.id == game.id }
+                if (updated != null) {
+                    _selectedGame.value = updated
+                }
+                _uiEvents.emit(UiEvent.ShowMessage("Removed $fileName"))
             }
         }
     }

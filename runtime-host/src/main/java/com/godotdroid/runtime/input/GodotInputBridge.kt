@@ -27,7 +27,9 @@ class GodotInputBridge(
 
     // Cached JNI reflection methods on GodotLib
     private var godotLibClass: Class<*>? = null
+    private var keyMethod6Params: Method? = null
     private var keyMethod5Params: Method? = null
+    private var keyMethod4Params: Method? = null
     private var keyMethod3Params: Method? = null
     private var joyButtonMethod: Method? = null
     private var joyAxisMethod: Method? = null
@@ -43,10 +45,11 @@ class GodotInputBridge(
 
             for (m in clazz.methods) {
                 if (m.name == "key") {
-                    if (m.parameterTypes.size == 5) {
-                        keyMethod5Params = m.apply { isAccessible = true }
-                    } else if (m.parameterTypes.size == 3) {
-                        keyMethod3Params = m.apply { isAccessible = true }
+                    when (m.parameterTypes.size) {
+                        6 -> keyMethod6Params = m.apply { isAccessible = true }
+                        5 -> keyMethod5Params = m.apply { isAccessible = true }
+                        4 -> keyMethod4Params = m.apply { isAccessible = true }
+                        3 -> keyMethod3Params = m.apply { isAccessible = true }
                     }
                 } else if (m.name == "joybutton") {
                     joyButtonMethod = m.apply { isAccessible = true }
@@ -55,16 +58,17 @@ class GodotInputBridge(
                 }
             }
             hasResolvedJni = true
-        } catch (_: Exception) {
+            Log.i(TAG, "Resolved GodotLib JNI: key6=$keyMethod6Params, key5=$keyMethod5Params, key4=$keyMethod4Params, key3=$keyMethod3Params, joyButton=$joyButtonMethod, joyAxis=$joyAxisMethod")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to resolve GodotLib JNI methods: ${e.message}")
             hasResolvedJni = true
         }
     }
 
     override fun sendKey(androidKeyCode: Int, godotKeyCode: Int, isPressed: Boolean) {
-        val view = targetViewProvider() ?: activity.window.decorView
-
-        // Path 1: Native View KeyEvent Dispatch
+        // Path 1: Native View KeyEvent Dispatch sequentially on UI thread
         activity.runOnUiThread {
+            val view = targetViewProvider() ?: activity.window.decorView
             val now = SystemClock.uptimeMillis()
             val action = if (isPressed) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP
             val event = KeyEvent(
@@ -72,29 +76,18 @@ class GodotInputBridge(
                 KeyCharacterMap.VIRTUAL_KEYBOARD, 0,
                 KeyEvent.FLAG_FROM_SYSTEM, InputDevice.SOURCE_KEYBOARD
             )
-            view.dispatchKeyEvent(event)
-        }
-
-        // Path 2: Direct GodotLib JNI Fallback
-        resolveJniMethods()
-        try {
-            if (keyMethod5Params != null) {
-                // Godot 4.x: key(keycode, physicalKeycode, unicode, pressed, echo)
-                keyMethod5Params?.invoke(null, godotKeyCode, godotKeyCode, 0, isPressed, false)
-            } else if (keyMethod3Params != null) {
-                // Godot 3.x: key(keycode, unicode, pressed)
-                keyMethod3Params?.invoke(null, godotKeyCode, 0, isPressed)
+            val handled = event.dispatch(view)
+            if (!handled) {
+                // Path 2: Direct GodotLib JNI Fallback ONLY when view does not consume it
+                dispatchDirectKeyJni(androidKeyCode, godotKeyCode, isPressed)
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "GodotLib.key JNI dispatch fallback error: ${e.message}")
         }
     }
 
     override fun sendJoyButton(buttonIndex: Int, isPressed: Boolean) {
-        val view = targetViewProvider() ?: activity.window.decorView
-
-        // Path 1: Native View KeyEvent with SOURCE_GAMEPAD
+        // Path 1: Native View KeyEvent with SOURCE_GAMEPAD sequentially on UI thread
         activity.runOnUiThread {
+            val view = targetViewProvider() ?: activity.window.decorView
             val now = SystemClock.uptimeMillis()
             val action = if (isPressed) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP
             val androidKeyCode = mapJoyButtonToAndroidKeyCode(buttonIndex)
@@ -103,26 +96,76 @@ class GodotInputBridge(
                 KeyCharacterMap.VIRTUAL_KEYBOARD, 0,
                 KeyEvent.FLAG_FROM_SYSTEM, InputDevice.SOURCE_GAMEPAD
             )
-            view.dispatchKeyEvent(event)
-        }
-
-        // Path 2: Direct GodotLib joybutton JNI Fallback
-        resolveJniMethods()
-        try {
-            joyButtonMethod?.invoke(null, 0, buttonIndex, isPressed)
-        } catch (e: Exception) {
-            Log.w(TAG, "GodotLib.joybutton JNI dispatch fallback error: ${e.message}")
+            val handled = event.dispatch(view)
+            if (!handled) {
+                // Path 2: Direct GodotLib joybutton JNI Fallback ONLY when view does not consume it
+                dispatchDirectJoyButtonJni(buttonIndex, isPressed)
+            }
         }
     }
 
     override fun sendJoyAxis(stickIndex: Int, axisX: Float, axisY: Float) {
-        // Direct GodotLib joyaxis JNI
+        activity.runOnUiThread {
+            resolveJniMethods()
+            try {
+                val baseAxis = if (stickIndex == 1) 2 else 0
+                joyAxisMethod?.invoke(null, 0, baseAxis, axisX)
+                joyAxisMethod?.invoke(null, 0, baseAxis + 1, axisY)
+            } catch (e: Exception) {
+                Log.w(TAG, "GodotLib.joyaxis JNI dispatch error: ${e.message}")
+            }
+        }
+    }
+
+    private fun dispatchDirectKeyJni(androidKeyCode: Int, godotKeyCode: Int, isPressed: Boolean): Boolean {
         resolveJniMethods()
-        try {
-            joyAxisMethod?.invoke(null, stickIndex, 0, axisX)
-            joyAxisMethod?.invoke(null, stickIndex, 1, axisY)
+        return try {
+            val unicode = when (androidKeyCode) {
+                KeyEvent.KEYCODE_SPACE -> 32
+                KeyEvent.KEYCODE_ENTER -> 10
+                KeyEvent.KEYCODE_TAB -> 9
+                in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 -> '0'.code + (androidKeyCode - KeyEvent.KEYCODE_0)
+                in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z -> 'A'.code + (androidKeyCode - KeyEvent.KEYCODE_A)
+                else -> if (godotKeyCode in 32..126) godotKeyCode else 0
+            }
+
+            if (keyMethod6Params != null) {
+                // Godot 4.3+ multi-window: key(screen, keycode, physicalKeycode, unicode, pressed, echo)
+                keyMethod6Params?.invoke(null, 0, godotKeyCode, godotKeyCode, unicode, isPressed, false)
+                true
+            } else if (keyMethod5Params != null) {
+                // Godot 4.x: key(keycode, physicalKeycode, unicode, pressed, echo)
+                keyMethod5Params?.invoke(null, godotKeyCode, godotKeyCode, unicode, isPressed, false)
+                true
+            } else if (keyMethod4Params != null) {
+                // Godot 3.x: key(chr, keycode, scancode, pressed)
+                // Note: Godot 3 JNI expects (unicode, androidKeyCode, unicode, isPressed)
+                keyMethod4Params?.invoke(null, unicode, androidKeyCode, unicode, isPressed)
+                true
+            } else if (keyMethod3Params != null) {
+                keyMethod3Params?.invoke(null, godotKeyCode, unicode, isPressed)
+                true
+            } else {
+                false
+            }
         } catch (e: Exception) {
-            Log.w(TAG, "GodotLib.joyaxis JNI dispatch error: ${e.message}")
+            Log.w(TAG, "GodotLib.key JNI dispatch fallback error: ${e.message}")
+            false
+        }
+    }
+
+    private fun dispatchDirectJoyButtonJni(buttonIndex: Int, isPressed: Boolean): Boolean {
+        resolveJniMethods()
+        return try {
+            if (joyButtonMethod != null) {
+                joyButtonMethod?.invoke(null, 0, buttonIndex, isPressed)
+                true
+            } else {
+                false
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "GodotLib.joybutton JNI dispatch fallback error: ${e.message}")
+            false
         }
     }
 
@@ -203,7 +246,7 @@ class GodotInputBridge(
      */
     fun dispatchHardwareKeyEvent(event: KeyEvent): Boolean {
         val view = targetViewProvider()
-        if (view != null && view.dispatchKeyEvent(event)) {
+        if (view != null && event.dispatch(view)) {
             return true
         }
 
@@ -211,15 +254,34 @@ class GodotInputBridge(
         val godotBtn = mapAndroidKeyCodeToGodotJoyButton(event.keyCode)
         if (godotBtn != -1) {
             val isPressed = event.action == KeyEvent.ACTION_DOWN
-            resolveJniMethods()
-            try {
-                joyButtonMethod?.invoke(null, 0, godotBtn, isPressed)
-                return true
-            } catch (e: Exception) {
-                Log.w(TAG, "GodotLib.joybutton JNI fallback error: ${e.message}")
-            }
+            return dispatchDirectJoyButtonJni(godotBtn, isPressed)
         }
+
+        // Hardware Keyboard & ADB Key Event Fallback
+        val isPressed = event.action == KeyEvent.ACTION_DOWN
+        val godotKeyCode = mapAndroidKeyCodeToGodotKeyCode(event.keyCode)
+        if (godotKeyCode != 0) {
+            return dispatchDirectKeyJni(event.keyCode, godotKeyCode, isPressed)
+        }
+
         return false
+    }
+
+    private fun mapAndroidKeyCodeToGodotKeyCode(androidKeyCode: Int): Int {
+        return when (androidKeyCode) {
+            KeyEvent.KEYCODE_SPACE -> 32
+            KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> 13
+            KeyEvent.KEYCODE_TAB -> 9
+            KeyEvent.KEYCODE_ESCAPE -> 27
+            KeyEvent.KEYCODE_DEL -> 8
+            in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z -> 'A'.code + (androidKeyCode - KeyEvent.KEYCODE_A)
+            in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 -> '0'.code + (androidKeyCode - KeyEvent.KEYCODE_0)
+            KeyEvent.KEYCODE_DPAD_UP -> 19
+            KeyEvent.KEYCODE_DPAD_DOWN -> 20
+            KeyEvent.KEYCODE_DPAD_LEFT -> 21
+            KeyEvent.KEYCODE_DPAD_RIGHT -> 22
+            else -> 0
+        }
     }
 
     /**

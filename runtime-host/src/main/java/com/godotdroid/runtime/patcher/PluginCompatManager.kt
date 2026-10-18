@@ -26,7 +26,10 @@ data class PluginCatalogEntry(
  */
 class PluginCompatManager(private val context: Context) {
 
-    private val pluginCacheDir = File(context.filesDir, "plugin_cache").apply { mkdirs() }
+    private val pluginCacheDir by lazy {
+        val base = context.filesDir ?: File(System.getProperty("java.io.tmpdir", "."), "godotdroid_plugin_cache")
+        File(base, "plugin_cache").apply { mkdirs() }
+    }
 
     val builtInPlugins: List<PluginCatalogEntry> = listOf(
         PluginCatalogEntry(

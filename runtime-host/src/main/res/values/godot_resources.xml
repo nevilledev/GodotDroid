@@ -2,7 +2,15 @@
 <resources>
     <!-- Godot Android Library Resources -->
     <dimen name="text_edit_height">30dp</dimen>
+    <string name="dialog_ok">OK</string>
+    <string name="text_error_title">Error</string>
+    <string name="text_button_cancel">Cancel</string>
     <string name="error_engine_setup_message">Engine setup failed.</string>
     <string name="error_missing_vulkan_requirements_message">Your device does not meet the requirements to run Vulkan on Android.</string>
     <string name="godot_project_name_string">Godot Game</string>
+    <string name="text_button_pause">Pause</string>
+    <string name="text_button_resume">Resume</string>
+    <string name="text_button_wifi_settings">Wi-Fi Settings</string>
+    <string name="text_paused_cellular">Download paused</string>
+    <string name="state_unknown">Unknown</string>
 </resources>
