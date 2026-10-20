@@ -686,16 +686,16 @@ class CoreManager(private val context: Context) {
                 displayName = "Godot 4.6.3 Stable (PCK v3)",
                 engineVersion = "4.6.3",
                 downloadUrl = "$DEFAULT_REGISTRY_BASE_URL/core_4.6.zip",
-                sizeBytes = 25694500L,
-                sha256 = "29eaa077f7020cb084f76b119cbe811d51574a7be59c933a5fb8ce40314bd7d8"
+                sizeBytes = 25625879L,
+                sha256 = "739b21251ba42127bf9028384d09cd150252ef0f1a0cafbadea8852da630d165"
             ),
             CoreDescriptor(
                 versionKey = "4.5",
                 displayName = "Godot 4.5 Stable (PCK v3)",
                 engineVersion = "4.5.0",
                 downloadUrl = "$DEFAULT_REGISTRY_BASE_URL/core_4.5.zip",
-                sizeBytes = 25430041L,
-                sha256 = "1488b8f90b89ccda7a96e26e77f89a06d404d504bf9416b4b195f8e9d09a20c3"
+                sizeBytes = 25411281L,
+                sha256 = "82bea9dd7f16f66fb95c242b8a87108581004d38287eaac261393e9f9a6b6caf"
             ),
             CoreDescriptor(
                 versionKey = "4.4",
