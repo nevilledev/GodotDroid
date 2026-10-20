@@ -224,8 +224,9 @@ class GodotRunnerActivity : FragmentActivity() {
             inspector.inspectHeader(targetFile)
         } catch (_: Exception) { null }
 
-        val detectedEngineMajor = pckHeader?.engineMajor ?: versionKey.substringBefore('.').toIntOrNull() ?: 4
-        val detectedEngineMinor = pckHeader?.engineMinor ?: versionKey.substringAfter('.').toIntOrNull() ?: 3
+        val vParts = versionKey.split('.')
+        val detectedEngineMajor = pckHeader?.engineMajor ?: vParts.getOrNull(0)?.toIntOrNull() ?: 4
+        val detectedEngineMinor = pckHeader?.engineMinor ?: vParts.getOrNull(1)?.toIntOrNull() ?: 3
         val detectedEnginePatch = pckHeader?.enginePatch ?: 0
         val detectedEngineVersion = "$detectedEngineMajor.$detectedEngineMinor.$detectedEnginePatch"
         val exactVersionKey = "$detectedEngineMajor.$detectedEngineMinor"

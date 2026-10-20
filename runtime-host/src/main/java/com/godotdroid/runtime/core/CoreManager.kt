@@ -1,6 +1,7 @@
 package com.godotdroid.runtime.core
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -58,10 +59,18 @@ class CoreManager(private val context: Context) {
     private val _registryCatalog = MutableStateFlow<List<CoreDescriptor>>(loadInitialCatalog())
     val registryCatalog: StateFlow<List<CoreDescriptor>> = _registryCatalog.asStateFlow()
 
+    fun isDebuggable(): Boolean {
+        return (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    }
+
     /**
      * Gets the configured custom or default GitHub registry base URL, sanitized.
+     * Custom URLs are only allowed in debuggable builds.
      */
     fun getRegistryBaseUrl(): String {
+        if (!isDebuggable()) {
+            return DEFAULT_REGISTRY_BASE_URL
+        }
         val raw = prefs.getString(PREF_REGISTRY_BASE_URL, DEFAULT_REGISTRY_BASE_URL) ?: DEFAULT_REGISTRY_BASE_URL
         val sanitized = sanitizeRegistryBaseUrl(raw)
         if (sanitized != raw) {
@@ -71,9 +80,13 @@ class CoreManager(private val context: Context) {
     }
 
     /**
-     * Updates the persistent custom GitHub registry base URL after sanitizing.
+     * Updates the persistent custom GitHub registry base URL after sanitizing (debug builds only).
      */
     fun setRegistryBaseUrl(url: String) {
+        if (!isDebuggable()) {
+            Log.w(TAG, "Custom registry URL can only be configured in debug builds")
+            return
+        }
         val sanitized = sanitizeRegistryBaseUrl(url)
         prefs.edit().putString(PREF_REGISTRY_BASE_URL, sanitized).apply()
     }
@@ -547,10 +560,11 @@ class CoreManager(private val context: Context) {
         descriptor: CoreDescriptor,
         onProgress: ((DownloadProgress) -> Unit)? = null
     ): Result<InstalledCore> = withContext(Dispatchers.IO) {
-        val major = descriptor.versionKey.substringBefore('.').toIntOrNull() ?: 4
-        val minor = descriptor.versionKey.substringAfter('.').toIntOrNull() ?: 0
+        val parts = descriptor.versionKey.split('.')
+        val major = parts.getOrNull(0)?.toIntOrNull() ?: 4
+        val minor = parts.getOrNull(1)?.toIntOrNull() ?: 0
         if (major > 4 || (major == 4 && minor >= 6)) {
-            val err = "Official Godot ${descriptor.versionKey} export templates reject external --main-pack arguments (disable_path_overrides=yes). A custom CI-built core compiled with disable_path_overrides=no is required."
+            val err = "Official Godot ${descriptor.versionKey} export templates reject external --main-pack arguments (disable_path_overrides=yes). A custom core compiled with disable_path_overrides=no is required."
             Log.e(TAG, err)
             return@withContext Result.failure(IllegalStateException(err))
         }
