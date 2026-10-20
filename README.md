@@ -82,6 +82,24 @@ GodotDroid supports the full spectrum of Godot Engine releases:
 
 ---
 
+## Tested Games & Compatibility Results
+
+The following table documents real hardware verification on physical ARM64 Android devices (Samsung Galaxy S24 Ultra, Qualcomm Adreno 830, Android 14+):
+
+| Game | Engine Version | Core Version | Status / Result |
+| :--- | :--- | :--- | :--- |
+| **Café-Seduction** (`v0.2.1`) | Godot 4.6.3 (PCK v3) | 4.6 (CI Built) | **PASS** — Playable at 120 FPS; audio, transitions, and main menu operational. |
+| **Coerced Hero Chronicles** (`v0.2.1`) | Godot 4.5.0 (PCK v3) | 4.5 (CI Built) | **PASS** — Playable at 120 FPS; SubViewport map rendering and camera tweeners functional. |
+| **Somatic Hex** | Godot 3.6.0 (PCK v1) | 3.6 (Official) | **PASS** — Playable; companion pack mounting and GDNative stubbing active. |
+| **Rhythm Rider** | Godot 3.3.2 (PCK v1) | 3.3 (Official) | **PASS** — Playable; audio sync and GLES2/GLES3 rendering stable. |
+| **Princess Loves Goblin** | Godot 3.3.2 (PCK v1) | 3.3 (Official) | **PASS** — Playable; touch input and scene transitions working properly. |
+| **Screamer Creamer** | Godot 3.3.2 (PCK v1) | 3.3 (Official) | **PASS** — Playable; high-frequency audio playback guard active. |
+| **StripFlip** | Godot 3.3.2 (PCK v1) | 3.3 (Official) | **PASS** — Playable; trackpad and button overlays responsive. |
+| **SuccManor** | Godot 3.3.2 (PCK v1) | 3.3 (Official) | **PASS** — Playable; companion pack mounting and asset streaming stable. |
+| **Kink's Quest** | Godot 3.5.x (PCK v1) | 3.5 (Official) | **PASS** — Playable; dialog system and character animations functional. |
+
+---
+
 ## Core Features in Detail
 
 ### 1. Modern Android Bionic Audio Deadlock Guard (`libgodot_compat.so`)

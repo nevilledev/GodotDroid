@@ -2,6 +2,7 @@ package com.godotdroid.runtime.patcher
 
 import android.app.Activity
 import com.godotdroid.pck.inspector.PckConstants
+import com.godotdroid.pck.model.PckFileEntry
 import com.godotdroid.pck.model.RendererType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -269,5 +270,51 @@ class RuntimePatchInjectorTest {
             injector.cleanupRuntimeEnvironment(gameId)
             assertFalse("Runtime directory must be cleaned up", env.runtimeDir.exists())
         }
+    }
+
+    @Test
+    fun testResolveProjectBinaryOverrides_UidAutoloadsAndScenes() {
+        // Construct a synthetic project.binary payload containing UID autoloads, main_scene, and bus layout
+        val dummyProjBinary = ("autoload/Decl\u001c\u0000\u0000\u0000\u0004\u0000\u0000\u0000\u0013\u0000\u0000\u0000*uid://otuuvm4j2vdo\u0000" +
+                "autoload/UI\u001c\u0000\u0000\u0000\u0004\u0000\u0000\u0000\u0014\u0000\u0000\u0000*uid://bf145sr1xf432\u0000" +
+                "autoload/Sounds\u001c\u0000\u0000\u0000\u0004\u0000\u0000\u0000\u0014\u0000\u0000\u0000*uid://bivvjsjhtvntn\u0000" +
+                "autoload/Text\u001c\u0000\u0000\u0000\u0004\u0000\u0000\u0000\u0013\u0000\u0000\u0000*uid://270vke52ydme\u0000" +
+                "application/run/main_scene\u001c\u0000\u0000\u0000\u0004\u0000\u0000\u0000\u0013\u0000\u0000\u0000uid://dqdpkdp7oq5xg\u0000" +
+                "audio/buses/default_bus_layout\u001c\u0000\u0000\u0000\u0004\u0000\u0000\u0000\u0012\u0000\u0000\u0000uid://wl1gjmiml0bm\u0000").toByteArray(Charsets.ISO_8859_1)
+
+        val files = listOf(
+            PckFileEntry("res://src/global/decl.tscn.remap", 0, 100, ByteArray(16), 0, "src/global/decl.tscn.remap"),
+            PckFileEntry("res://src/global/decl.gd.remap", 0, 100, ByteArray(16), 0, "src/global/decl.gd.remap"),
+            PckFileEntry("res://src/ui/ui.gd.remap", 0, 100, ByteArray(16), 0, "src/ui/ui.gd.remap"),
+            PckFileEntry("res://src/global/sounds.gd.remap", 0, 100, ByteArray(16), 0, "src/global/sounds.gd.remap"),
+            PckFileEntry("res://src/global/text.gd.remap", 0, 100, ByteArray(16), 0, "src/global/text.gd.remap"),
+            PckFileEntry("res://src/main.tscn.remap", 0, 100, ByteArray(16), 0, "src/main.tscn.remap"),
+            PckFileEntry("res://src/default_bus_layout.tres.remap", 0, 100, ByteArray(16), 0, "src/default_bus_layout.tres.remap")
+        )
+
+        val overrides = injector.resolveProjectBinaryOverrides(dummyProjBinary, files, null)
+
+        assertEquals("*res://src/global/decl.tscn", overrides.autoloads["Decl"])
+        assertEquals("*res://src/ui/ui.gd", overrides.autoloads["UI"])
+        assertEquals("*res://src/global/sounds.gd", overrides.autoloads["Sounds"])
+        assertEquals("*res://src/global/text.gd", overrides.autoloads["Text"])
+        assertEquals("res://src/main.tscn", overrides.mainScene)
+        assertEquals("res://src/default_bus_layout.tres", overrides.busLayout)
+
+        // Verify override.cfg generation includes all resolved items
+        val cfg = injector.generateOverrideCfg(
+            renderer = RendererType.GL_COMPATIBILITY,
+            mainSceneOverride = overrides.mainScene,
+            busLayoutOverride = overrides.busLayout,
+            extraAutoloads = overrides.autoloads,
+            engineMajor = 4
+        )
+
+        assertTrue(cfg.contains("Decl=\"*res://src/global/decl.tscn\""))
+        assertTrue(cfg.contains("UI=\"*res://src/ui/ui.gd\""))
+        assertTrue(cfg.contains("Sounds=\"*res://src/global/sounds.gd\""))
+        assertTrue(cfg.contains("Text=\"*res://src/global/text.gd\""))
+        assertTrue(cfg.contains("run/main_scene=\"res://src/main.tscn\""))
+        assertTrue(cfg.contains("buses/default_bus_layout=\"res://src/default_bus_layout.tres\""))
     }
 }

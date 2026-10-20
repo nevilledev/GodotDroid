@@ -24,7 +24,66 @@ class GameCompatibilityAnalyzer(
             val channel = raf.channel
             val inspectResult = inspector.inspect(channel, channel.size())
             val fallbackTitle = file.nameWithoutExtension
-            return analyze(channel, inspectResult, fallbackTitle)
+            val report = analyze(channel, inspectResult, fallbackTitle)
+
+            val parentDir = file.parentFile
+            val hasExternalDotNet = detectExternalDotNetFolder(parentDir, file.nameWithoutExtension)
+            return if (hasExternalDotNet) {
+                report.copy(usesDotNet = true)
+            } else {
+                report
+            }
+        }
+    }
+
+    companion object {
+        /**
+         * Detects desktop Mono / .NET assemblies located in sibling directories next to the executable,
+         * such as `data_<name>/`, `<name>_Data/`, `mono/`, or loose `.dll` assemblies.
+         */
+        fun detectExternalDotNetFolder(parentDir: File?, baseName: String): Boolean {
+            if (parentDir == null || !parentDir.exists() || !parentDir.isDirectory) return false
+
+            val siblingFiles = parentDir.listFiles() ?: return false
+            for (sibling in siblingFiles) {
+                val sName = sibling.name.lowercase()
+                if (sibling.isFile) {
+                    if (sName == "godotsharp.dll" || sName == "godotsharpeditor.dll" || sName == "mscorlib.dll") {
+                        return true
+                    }
+                } else if (sibling.isDirectory) {
+                    val isDataFolder = sName.startsWith("data_") ||
+                            sName.endsWith("_data") ||
+                            sName == "mono" ||
+                            sName == ".mono" ||
+                            sName == "assemblies"
+                    if (isDataFolder && containsDotNetAssemblies(sibling)) {
+                        return true
+                    }
+                }
+            }
+            return false
+        }
+
+        private fun containsDotNetAssemblies(dir: File, depth: Int = 0): Boolean {
+            if (depth > 3) return false
+            val children = dir.listFiles() ?: return false
+            for (child in children) {
+                val cName = child.name.lowercase()
+                if (child.isFile) {
+                    if (cName.endsWith(".dll") || cName.endsWith(".pdb")) {
+                        return true
+                    }
+                } else if (child.isDirectory) {
+                    if (cName == "mono" || cName == "assemblies" || cName == "managed") {
+                        return true
+                    }
+                    if (containsDotNetAssemblies(child, depth + 1)) {
+                        return true
+                    }
+                }
+            }
+            return false
         }
     }
 

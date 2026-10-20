@@ -61,7 +61,10 @@ class DynamicGodotLoader(private val context: Context) {
                 core.soFile.setReadOnly()
             }
 
-            // 2. Build native library search path (core directory + runtime jniLibs)
+            // 2. Verify cryptographic SHA-256 integrity before loading core binary
+            verifyCoreIntegrity(core)
+
+            // 3. Build native library search path (core directory + runtime jniLibs)
             val nativeLibPath = "${core.coreDir.absolutePath}${File.pathSeparator}${environment.jniLibsDir.absolutePath}"
 
             // 3. Create DexClassLoader
@@ -275,6 +278,12 @@ class DynamicGodotLoader(private val context: Context) {
         var fragmentAttached = false
 
         // Check for Godot 4.x GodotHost lifecycle methods
+        val initEngineMethod = godotClass.methods.find {
+            it.name == "initEngine" &&
+                    godotHostClass != null &&
+                    it.parameterTypes.isNotEmpty() &&
+                    it.parameterTypes[0].isAssignableFrom(godotHostClass)
+        }
         val onCreateMethod = godotClass.methods.find {
             it.name == "onCreate" && it.parameterTypes.size == 1 &&
                     godotHostClass != null && it.parameterTypes[0].isAssignableFrom(godotHostClass)
@@ -284,31 +293,52 @@ class DynamicGodotLoader(private val context: Context) {
                     godotHostClass != null && it.parameterTypes[0].isAssignableFrom(godotHostClass)
         }
 
-        if (onCreateMethod != null && godotHostProxy != null) {
+        if ((initEngineMethod != null || onCreateMethod != null) && godotHostProxy != null) {
             Log.i(TAG, "Godot CLI arguments (${cliArgs.size}): ${cliArgs.joinToString(" ")}")
-            Log.i(TAG, "Invoking Godot.onCreate(GodotHost)")
-            onCreateMethod.isAccessible = true
-            try {
-                onCreateMethod.invoke(godotInstance, godotHostProxy)
-            } catch (e: Throwable) {
-                val cause = unwrapException(e)
-                Log.e(TAG, "Godot.onCreate(GodotHost) failed: ${cause.message}", cause)
-                throw cause
-            }
-
-            if (onInitNativeLayerMethod != null) {
-                Log.i(TAG, "Invoking Godot.onInitNativeLayer(GodotHost)")
-                onInitNativeLayerMethod.isAccessible = true
+            if (initEngineMethod != null) {
+                Log.i(TAG, "Invoking Godot.initEngine for Godot 4.5+")
+                initEngineMethod.isAccessible = true
                 val nativeSuccess = try {
-                    onInitNativeLayerMethod.invoke(godotInstance, godotHostProxy) as? Boolean ?: true
+                    val result = when (initEngineMethod.parameterTypes.size) {
+                        3 -> initEngineMethod.invoke(godotInstance, godotHostProxy, cliArgs.toList(), emptySet<Any>())
+                        2 -> initEngineMethod.invoke(godotInstance, godotHostProxy, cliArgs.toList())
+                        else -> initEngineMethod.invoke(godotInstance, godotHostProxy)
+                    }
+                    result as? Boolean ?: true
                 } catch (e: Throwable) {
                     val cause = unwrapException(e)
-                    Log.e(TAG, "Godot.onInitNativeLayer(GodotHost) failed: ${cause.message}", cause)
+                    Log.e(TAG, "Godot.initEngine failed: ${cause.message}", cause)
                     throw cause
                 }
-                Log.i(TAG, "Godot native layer initialization result: $nativeSuccess")
+                Log.i(TAG, "Godot.initEngine result: $nativeSuccess")
                 if (!nativeSuccess) {
-                    throw IllegalStateException("Godot native layer initialization failed (onInitNativeLayer returned false)")
+                    throw IllegalStateException("Godot native initialization failed (initEngine returned false)")
+                }
+            } else if (onCreateMethod != null) {
+                Log.i(TAG, "Invoking Godot.onCreate(GodotHost)")
+                onCreateMethod.isAccessible = true
+                try {
+                    onCreateMethod.invoke(godotInstance, godotHostProxy)
+                } catch (e: Throwable) {
+                    val cause = unwrapException(e)
+                    Log.e(TAG, "Godot.onCreate(GodotHost) failed: ${cause.message}", cause)
+                    throw cause
+                }
+
+                if (onInitNativeLayerMethod != null) {
+                    Log.i(TAG, "Invoking Godot.onInitNativeLayer(GodotHost)")
+                    onInitNativeLayerMethod.isAccessible = true
+                    val nativeSuccess = try {
+                        onInitNativeLayerMethod.invoke(godotInstance, godotHostProxy) as? Boolean ?: true
+                    } catch (e: Throwable) {
+                        val cause = unwrapException(e)
+                        Log.e(TAG, "Godot.onInitNativeLayer(GodotHost) failed: ${cause.message}", cause)
+                        throw cause
+                    }
+                    Log.i(TAG, "Godot native layer initialization result: $nativeSuccess")
+                    if (!nativeSuccess) {
+                        throw IllegalStateException("Godot native layer initialization failed (onInitNativeLayer returned false)")
+                    }
                 }
             }
 
@@ -768,6 +798,41 @@ class DynamicGodotLoader(private val context: Context) {
                 ?: unwrapped.localizedMessage?.takeIf { it.isNotBlank() }
                 ?: unwrapped.javaClass.simpleName
             return "${unwrapped.javaClass.simpleName}: $msg"
+        }
+
+        fun verifyCoreIntegrity(core: InstalledCore) {
+            val soFile = core.soFile
+            if (!soFile.exists()) {
+                throw IllegalStateException("Core binary does not exist at ${soFile.absolutePath}")
+            }
+            val calculatedSha = calculateSha256(soFile)
+            val expectedSha = core.sha256.ifBlank {
+                val manifestFile = File(core.coreDir, "core_manifest.json")
+                if (manifestFile.exists()) {
+                    try {
+                        org.json.JSONObject(manifestFile.readText()).optString("sha256", "")
+                    } catch (_: Exception) { "" }
+                } else ""
+            }
+
+            if (expectedSha.isNotBlank() && !calculatedSha.equals(expectedSha, ignoreCase = true)) {
+                val msg = "Core binary SHA-256 checksum mismatch for Godot ${core.versionKey}! Expected: $expectedSha, calculated: $calculatedSha"
+                Log.e(TAG, msg)
+                throw SecurityException(msg)
+            }
+            Log.i(TAG, "Core binary SHA-256 verified for Godot ${core.versionKey}: $calculatedSha")
+        }
+
+        fun calculateSha256(file: File): String {
+            val md = java.security.MessageDigest.getInstance("SHA-256")
+            file.inputStream().use { input ->
+                val buf = ByteArray(32768)
+                var read: Int
+                while (input.read(buf).also { read = it } != -1) {
+                    md.update(buf, 0, read)
+                }
+            }
+            return md.digest().joinToString("") { "%02x".format(it) }
         }
     }
 }

@@ -107,7 +107,7 @@ object ProjectConfigParser {
                 } else if (key.equals("run/main_scene", ignoreCase = true) ||
                     key.equals("application/run/main_scene", ignoreCase = true)
                 ) {
-                    if (i + 1 < strings.size && strings[i + 1].startsWith("res://")) {
+                    if (i + 1 < strings.size && (strings[i + 1].startsWith("res://") || strings[i + 1].startsWith("uid://"))) {
                         if (mainScene == null) mainScene = strings[i + 1]
                     }
                 } else if (key.equals("config/icon", ignoreCase = true) ||
@@ -142,7 +142,7 @@ object ProjectConfigParser {
                 }
             }
             if (mainScene == null) {
-                val match = Regex("""res://[a-zA-Z0-9_\-/]+\.(?:tscn|scn)""").find(fullText)
+                val match = Regex("""(?:res://[a-zA-Z0-9_\-/]+\.(?:tscn|scn)|uid://[a-zA-Z0-9]+)""").find(fullText)
                 if (match != null) {
                     mainScene = match.value.trim()
                 }

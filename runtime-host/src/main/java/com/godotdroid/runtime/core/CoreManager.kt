@@ -233,20 +233,16 @@ class CoreManager(private val context: Context) {
     }
 
     /**
-     * Finds matching installed core for an engine version (e.g. major=4, minor=3 -> "4.3").
+     * Finds matching installed core for an engine version by exact major.minor (e.g. major=4, minor=6 -> "4.6").
+     * Never falls back to a different minor version.
      */
     fun findMatchingCore(engineMajor: Int, engineMinor: Int): InstalledCore? {
         val targetKey = "$engineMajor.$engineMinor"
-        val exactMatch = getCore(targetKey)
-        if (exactMatch != null) return exactMatch
-
-        // Fallback: match by major version (e.g., any 4.x core if compatible)
-        val installed = getInstalledCores()
-        return installed.firstOrNull { it.versionKey.startsWith("$engineMajor.") }
+        return getCore(targetKey)
     }
 
     /**
-     * Retrieves an installed core by its version key (e.g., "4.3").
+     * Retrieves an installed core by its exact version key (e.g., "4.6").
      */
     fun getCore(versionKey: String): InstalledCore? {
         val dir = File(coresDir, versionKey)
@@ -438,7 +434,13 @@ class CoreManager(private val context: Context) {
         descriptor: CoreDescriptor,
         onProgress: ((DownloadProgress) -> Unit)? = null
     ): Result<InstalledCore> = withContext(Dispatchers.IO) {
-        val fixedUrl = descriptor.downloadUrl.replace("nevilledroid", "nevilledev", ignoreCase = true)
+        val baseConfigured = getRegistryBaseUrl()
+        val fixedUrl = if (baseConfigured != DEFAULT_REGISTRY_BASE_URL && descriptor.downloadUrl.contains("releases/download/cores-latest")) {
+            val fileName = "core_${descriptor.versionKey}.zip"
+            "$baseConfigured/$fileName"
+        } else {
+            descriptor.downloadUrl.replace("nevilledroid", "nevilledev", ignoreCase = true)
+        }
         Log.i(TAG, "Get tapped: versionKey=${descriptor.versionKey}, url=$fixedUrl")
 
         // If the downloadUrl points directly to godotengine release assets that are not .tpz or if blank, jump directly to TPZ range downloader
@@ -545,6 +547,14 @@ class CoreManager(private val context: Context) {
         descriptor: CoreDescriptor,
         onProgress: ((DownloadProgress) -> Unit)? = null
     ): Result<InstalledCore> = withContext(Dispatchers.IO) {
+        val major = descriptor.versionKey.substringBefore('.').toIntOrNull() ?: 4
+        val minor = descriptor.versionKey.substringAfter('.').toIntOrNull() ?: 0
+        if (major > 4 || (major == 4 && minor >= 6)) {
+            val err = "Official Godot ${descriptor.versionKey} export templates reject external --main-pack arguments (disable_path_overrides=yes). A custom CI-built core compiled with disable_path_overrides=no is required."
+            Log.e(TAG, err)
+            return@withContext Result.failure(IllegalStateException(err))
+        }
+
         val targetApk = File(context.cacheDir, "temp_official_template_${descriptor.versionKey}_${System.currentTimeMillis()}.apk")
         try {
             val tpzResult = tpzRangeDownloader.downloadForVersion(
@@ -659,17 +669,19 @@ class CoreManager(private val context: Context) {
             ),
             CoreDescriptor(
                 versionKey = "4.6",
-                displayName = "Godot 4.6 Dev (PCK v4)",
-                engineVersion = "4.6.0",
+                displayName = "Godot 4.6.3 Stable (PCK v3)",
+                engineVersion = "4.6.3",
                 downloadUrl = "$DEFAULT_REGISTRY_BASE_URL/core_4.6.zip",
-                sizeBytes = 38_000_000L
+                sizeBytes = 25694500L,
+                sha256 = "29eaa077f7020cb084f76b119cbe811d51574a7be59c933a5fb8ce40314bd7d8"
             ),
             CoreDescriptor(
                 versionKey = "4.5",
                 displayName = "Godot 4.5 Stable (PCK v3)",
                 engineVersion = "4.5.0",
                 downloadUrl = "$DEFAULT_REGISTRY_BASE_URL/core_4.5.zip",
-                sizeBytes = 37_000_000L
+                sizeBytes = 25430041L,
+                sha256 = "1488b8f90b89ccda7a96e26e77f89a06d404d504bf9416b4b195f8e9d09a20c3"
             ),
             CoreDescriptor(
                 versionKey = "4.4",

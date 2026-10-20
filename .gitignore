@@ -19,3 +19,16 @@
 /*.pb
 /*.so
 /*.png
+core_*_extracted/
+dist_cores/
+core_*.zip
+*.tpz
+*.pck
+*.exe
+scratch_*
+*.full
+*.binary
+temp_*.db
+inspect_game.py
+install_core_*.py
+downscaler_*.txt

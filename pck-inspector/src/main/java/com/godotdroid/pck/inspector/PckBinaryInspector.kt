@@ -327,7 +327,8 @@ class PckBinaryInspector {
 
             val rawStringBytes = ByteArray(pathLength)
             pathBytes.get(rawStringBytes)
-            var path = String(rawStringBytes, Charsets.UTF_8).trimEnd('\u0000')
+            val rawPath = String(rawStringBytes, Charsets.UTF_8).trimEnd('\u0000')
+            var path = rawPath
             if (!path.startsWith("res://") && !path.startsWith("user://")) {
                 path = "res://" + path.trimStart('/')
             }
@@ -376,7 +377,8 @@ class PckBinaryInspector {
                     fileOffset = actualOffset,
                     size = size,
                     md5 = md5,
-                    flags = entryFlags
+                    flags = entryFlags,
+                    rawPath = rawPath
                 )
             )
         }
@@ -430,7 +432,13 @@ class PckBinaryInspector {
                 dstChannel.truncate(0)
 
                 val startOffset = header.pckStartOffset
-                val lengthToCopy = srcChannel.size() - startOffset
+                val fileLength = srcChannel.size()
+                val hasTrailer = fileLength >= 12 && verifyMagicAt(srcChannel, fileLength - 4)
+                val lengthToCopy = if (header.isEmbeddedExe && hasTrailer) {
+                    (fileLength - startOffset - 12L).coerceAtLeast(0L)
+                } else {
+                    fileLength - startOffset
+                }
                 var transferred = 0L
 
                 while (transferred < lengthToCopy) {
@@ -501,8 +509,11 @@ class PckBinaryInspector {
                     }
                 }
 
+                dstChannel.force(true)
                 return transferred
             }
+        }.also {
+            targetPckFile.setReadable(true, false)
         }
     }
 }

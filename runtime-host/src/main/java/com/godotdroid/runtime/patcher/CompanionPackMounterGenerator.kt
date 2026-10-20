@@ -11,6 +11,13 @@ import java.io.File
  */
 object CompanionPackMounterGenerator {
 
+    fun escapeGdString(str: String): String {
+        return str.replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+    }
+
     fun generateMountScript(
         companionPcks: List<String>,
         mainPackName: String,
@@ -18,7 +25,8 @@ object CompanionPackMounterGenerator {
         runtimeDirPath: String = ""
     ): String {
         val isGodot3 = engineMajor == 3
-        val cleanDir = runtimeDirPath.replace('\\', '/').trimEnd('/')
+        val cleanDir = escapeGdString(runtimeDirPath.replace('\\', '/').trimEnd('/'))
+        val escapedMainPack = escapeGdString(mainPackName)
         val sb = StringBuilder()
 
         sb.appendLine("# GodotDroid Companion Pack Auto-Mounter")
@@ -28,7 +36,7 @@ object CompanionPackMounterGenerator {
         sb.appendLine("func _init():")
         sb.appendLine("    print(\"[GodotDroid] Initializing companion pack auto-mounter...\")")
 
-        val pckArrayLiteral = companionPcks.joinToString(", ") { "\"$it\"" }
+        val pckArrayLiteral = companionPcks.joinToString(", ") { "\"${escapeGdString(it)}\"" }
         sb.appendLine("    var known_packs = [$pckArrayLiteral]")
         sb.appendLine("    for pack_name in known_packs:")
         sb.appendLine("        _mount_pack(pack_name)")
@@ -41,8 +49,9 @@ object CompanionPackMounterGenerator {
             sb.appendLine("        dir.list_dir_begin(true)")
             sb.appendLine("        var f = dir.get_next()")
             sb.appendLine("        while f != \"\":")
-            sb.appendLine("            if not dir.current_is_dir() and (f.ends_with(\".pck\") or f.ends_with(\".zip\")):")
-            sb.appendLine("                if f != \"runtime_staged.pck\" and f != \"$mainPackName\":")
+            sb.appendLine("            var lower_f = f.to_lower()")
+            sb.appendLine("            if not dir.current_is_dir() and (lower_f.ends_with(\".pck\") or lower_f.ends_with(\".zip\")):")
+            sb.appendLine("                if lower_f != \"runtime_staged.pck\" and f != \"$escapedMainPack\":")
             sb.appendLine("                    _mount_pack(f)")
             sb.appendLine("            f = dir.get_next()")
             sb.appendLine("    print(\"[GodotDroid] Companion pack auto-mounter finished.\")")
@@ -75,8 +84,9 @@ object CompanionPackMounterGenerator {
             sb.appendLine("        dir.list_dir_begin()")
             sb.appendLine("        var f = dir.get_next()")
             sb.appendLine("        while f != \"\":")
-            sb.appendLine("            if not dir.current_is_dir() and (f.ends_with(\".pck\") or f.ends_with(\".zip\")):")
-            sb.appendLine("                if f != \"runtime_staged.pck\" and f != \"$mainPackName\":")
+            sb.appendLine("            var lower_f = f.to_lower()")
+            sb.appendLine("            if not dir.current_is_dir() and (lower_f.ends_with(\".pck\") or lower_f.ends_with(\".zip\")):")
+            sb.appendLine("                if lower_f != \"runtime_staged.pck\" and f != \"$escapedMainPack\":")
             sb.appendLine("                    _mount_pack(f)")
             sb.appendLine("            f = dir.get_next()")
             sb.appendLine("    print(\"[GodotDroid] Companion pack auto-mounter finished.\")")

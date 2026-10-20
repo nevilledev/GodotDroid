@@ -130,36 +130,152 @@ class GodotRunnerActivity : FragmentActivity() {
             RendererType.MOBILE
         }
 
-        val targetFile = File(filePath)
+        var targetFile = File(filePath)
+        val parentDir = targetFile.parentFile
+        if (parentDir != null && parentDir.exists()) {
+            val mainPck = File(parentDir, "main.pck")
+            if (mainPck.exists() && mainPck.length() > 0) {
+                targetFile = mainPck
+            }
+        }
+
+        if (!targetFile.exists()) {
+            val parent = targetFile.parentFile
+            if (parent != null && parent.exists()) {
+                val match = parent.listFiles()?.firstOrNull {
+                    it.name.equals(targetFile.name, ignoreCase = true) ||
+                    java.text.Normalizer.normalize(it.name, java.text.Normalizer.Form.NFD)
+                        .equals(java.text.Normalizer.normalize(targetFile.name, java.text.Normalizer.Form.NFD), ignoreCase = true) ||
+                    (targetFile.name == "main.pck" && it.extension.lowercase() in listOf("exe", "pck"))
+                }
+                if (match != null) {
+                    targetFile = match
+                }
+            }
+        }
+
+        // On-demand embedded EXE carving: If targetFile is an embedded Windows .exe, extract main.pck directly
+        if (targetFile.exists() && targetFile.extension.lowercase() == "exe") {
+            try {
+                val inspector = com.godotdroid.pck.inspector.PckBinaryInspector()
+                val header = inspector.inspectHeader(targetFile)
+                if (header.isEmbeddedExe) {
+                    val mainPck = File(targetFile.parentFile, "main.pck")
+                    if (!mainPck.exists() || mainPck.length() == 0L) {
+                        inspector.extractStandalonePck(targetFile, mainPck, header)
+                        mainPck.setReadable(true, false)
+                    }
+                    if (mainPck.exists() && mainPck.length() > 0) {
+                        Log.i(TAG, "Using carved standalone PCK: ${mainPck.absolutePath} (${mainPck.length()} bytes)")
+                        targetFile = mainPck
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "On-demand extraction from embedded EXE failed: ${e.message}")
+            }
+        }
+
         if (!targetFile.exists()) {
             Toast.makeText(this, "Game file not found: $filePath", Toast.LENGTH_LONG).show()
             finish()
             return
         }
 
+        // Preflight generic unsupported feature checks
+        val analyzer = com.godotdroid.pck.analyzer.GameCompatibilityAnalyzer()
+        val report = try {
+            analyzer.analyze(targetFile)
+        } catch (e: Exception) {
+            Log.w(TAG, "Preflight compatibility analysis skipped: ${e.message}")
+            null
+        }
+
+        if (report != null) {
+            if (report.isEncrypted) {
+                val errMsg = "Encrypted PCK is not supported"
+                Log.e(TAG, errMsg)
+                Toast.makeText(this, errMsg, Toast.LENGTH_LONG).show()
+                finish()
+                return
+            }
+            if (report.usesDotNet) {
+                val errMsg = "This game was built with Godot Mono / .NET (C#). Desktop C# assemblies are not supported by the Android runtime."
+                Log.e(TAG, errMsg)
+                Toast.makeText(this, errMsg, Toast.LENGTH_LONG).show()
+                finish()
+                return
+            }
+            if (report.missingAndroidPlugins.isNotEmpty()) {
+                val missingNames = report.missingAndroidPlugins.joinToString { it.name }
+                val errMsg = "Unsupported desktop GDExtension DLLs without Android ARM64 binaries ($missingNames)"
+                Log.e(TAG, errMsg)
+                Toast.makeText(this, errMsg, Toast.LENGTH_LONG).show()
+                finish()
+                return
+            }
+        }
+
         // Show loading splash
         showLoadingIndicator(gameTitle, versionKey)
 
-        // 4. Find matching installed core
-        val major = versionKey.substringBefore('.').toIntOrNull() ?: 4
-        val minor = versionKey.substringAfter('.').toIntOrNull() ?: 3
-        val core = coreManager.getCore(versionKey)
-            ?: coreManager.findMatchingCore(major, minor)
+        // 4. Find matching installed core by exact major.minor from PCK header
+        val pckHeader = try {
+            val inspector = com.godotdroid.pck.inspector.PckBinaryInspector()
+            inspector.inspectHeader(targetFile)
+        } catch (_: Exception) { null }
 
-        if (core == null) {
-            Toast.makeText(
-                this,
-                "No installed Godot core found for version $versionKey. Please install or import a core first.",
-                Toast.LENGTH_LONG
-            ).show()
-            finish()
-            return
-        }
-
-        Log.i(TAG, "Launching $gameTitle with core ${core.engineVersion} (${core.versionKey})")
+        val detectedEngineMajor = pckHeader?.engineMajor ?: versionKey.substringBefore('.').toIntOrNull() ?: 4
+        val detectedEngineMinor = pckHeader?.engineMinor ?: versionKey.substringAfter('.').toIntOrNull() ?: 3
+        val detectedEnginePatch = pckHeader?.enginePatch ?: 0
+        val detectedEngineVersion = "$detectedEngineMajor.$detectedEngineMinor.$detectedEnginePatch"
+        val exactVersionKey = "$detectedEngineMajor.$detectedEngineMinor"
 
         // 5. Prepare runtime environment and load Godot asynchronously
         lifecycleScope.launch {
+            var core = coreManager.getCore(exactVersionKey)
+                ?: coreManager.findMatchingCore(detectedEngineMajor, detectedEngineMinor)
+
+            if (core == null) {
+                // Check if core is available in registry (driven by cores_manifest.json)
+                var descriptor = coreManager.getRegistryCatalog().find { it.versionKey == exactVersionKey }
+                if (descriptor == null) {
+                    coreManager.syncRemoteManifest()
+                    descriptor = coreManager.getRegistryCatalog().find { it.versionKey == exactVersionKey }
+                }
+
+                if (descriptor == null) {
+                    val errorMsg = "Needs Godot $exactVersionKey core, not available"
+                    Log.e(TAG, errorMsg)
+                    Toast.makeText(this@GodotRunnerActivity, errorMsg, Toast.LENGTH_LONG).show()
+                    finish()
+                    return@launch
+                }
+
+                Log.i(TAG, "Godot $exactVersionKey core not installed. Auto-downloading ${descriptor.displayName}...")
+                loadingTextView?.text = "Downloading Godot $exactVersionKey core..."
+
+                val downloadResult = coreManager.downloadCore(descriptor) { progress ->
+                    runOnUiThread {
+                        loadingTextView?.text = "Downloading Godot $exactVersionKey core: ${progress.percentage}%"
+                    }
+                }
+
+                core = downloadResult.getOrNull()
+                if (core == null) {
+                    val errorMsg = "Needs Godot $exactVersionKey core, not available: ${downloadResult.exceptionOrNull()?.message}"
+                    Log.e(TAG, errorMsg, downloadResult.exceptionOrNull())
+                    Toast.makeText(this@GodotRunnerActivity, errorMsg, Toast.LENGTH_LONG).show()
+                    finish()
+                    return@launch
+                }
+                Log.i(TAG, "Successfully auto-downloaded and installed Godot $exactVersionKey core: ${core.engineVersion}")
+            }
+
+            val coreMajor = core.engineVersion.substringBefore('.').toIntOrNull() ?: detectedEngineMajor
+            val coreMinor = core.engineVersion.substringAfter('.').substringBefore('.').toIntOrNull() ?: detectedEngineMinor
+
+            Log.i(TAG, "Launching $gameTitle with core ${core.engineVersion} (${core.versionKey})")
+
             val environment = withContext(Dispatchers.IO) {
                 patchInjector.prepareRuntimeEnvironment(
                     gameId = gameId.ifBlank { "game_${System.currentTimeMillis()}" },
@@ -167,10 +283,37 @@ class GodotRunnerActivity : FragmentActivity() {
                     selectedRenderer = renderer,
                     mainSceneOverride = mainSceneOverride,
                     injectSteamStub = injectSteamStub,
-                    engineMajor = major,
-                    engineMinor = minor
+                    engineMajor = coreMajor,
+                    engineMinor = coreMinor
                 )
             }
+
+            // Pre-launch validation and logging
+            val stagedPckFile = File(environment.runtimeDir, "runtime_staged.pck")
+            val targetForInspection = if (stagedPckFile.exists()) stagedPckFile else targetFile
+            val projectBinaryMagic = try {
+                java.io.RandomAccessFile(targetForInspection, "r").use { raf ->
+                    val ch = raf.channel
+                    val insp = com.godotdroid.pck.inspector.PckBinaryInspector()
+                    val res = insp.inspect(ch, ch.size())
+                    val pbEntry = res.files.find { it.path == "res://project.binary" || it.rawPath == "project.binary" }
+                    if (pbEntry != null) {
+                        val buf = java.nio.ByteBuffer.allocate(4)
+                        ch.position(pbEntry.fileOffset)
+                        ch.read(buf)
+                        buf.flip()
+                        val b = ByteArray(4)
+                        buf.get(b)
+                        String(b, Charsets.ISO_8859_1)
+                    } else {
+                        "NOT_FOUND"
+                    }
+                }
+            } catch (e: Exception) {
+                "ERR: ${e.message}"
+            }
+
+            Log.i(TAG, "[LAUNCH_PREFLIGHT] Detected engine version: $detectedEngineVersion, Chosen core version: ${core.engineVersion} (${core.versionKey}), Renderer: ${renderer.name}, Staged source path: ${targetFile.absolutePath}, Staged runtime path: ${targetForInspection.absolutePath}, project.binary magic: $projectBinaryMagic")
 
             // 6. Instantiate Hybrid Input Bridge
             inputBridge = GodotInputBridge(
@@ -295,6 +438,7 @@ class GodotRunnerActivity : FragmentActivity() {
     }
 
     private var loadingView: View? = null
+    private var loadingTextView: TextView? = null
 
     private fun showLoadingIndicator(title: String, version: String) {
         val layout = FrameLayout(this).apply {
@@ -326,6 +470,7 @@ class GodotRunnerActivity : FragmentActivity() {
         layout.addView(progressBar)
         layout.addView(textView)
         loadingView = layout
+        loadingTextView = textView
         rootContainer.addView(layout)
     }
 
@@ -333,6 +478,7 @@ class GodotRunnerActivity : FragmentActivity() {
         loadingView?.let {
             rootContainer.removeView(it)
             loadingView = null
+            loadingTextView = null
         }
     }
 

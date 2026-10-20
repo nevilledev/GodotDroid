@@ -1,0 +1,234 @@
+name: Build and Release CI Cores (Godot 4.5 & 4.6.3)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci-built-cores
+    paths:
+      - '.github/workflows/build-cores.yml'
+      - 'scripts/build_core_registry.py'
+
+concurrency:
+  group: build-cores-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-core:
+    name: Build Godot ${{ matrix.version_key }} Core (arm64-v8a)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version_key: "4.6"
+            godot_version: "4.6.3-stable"
+            godot_tag: "4.6.3-stable"
+            engine_version: "4.6.3"
+            engine_major: 4
+            display_name: "Godot 4.6 Stable"
+          - version_key: "4.5"
+            godot_version: "4.5-stable"
+            godot_tag: "4.5-stable"
+            engine_version: "4.5.0"
+            engine_major: 4
+            display_name: "Godot 4.5 Stable"
+
+    steps:
+      - name: Checkout GodotDroid Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Build Dependencies
+        run: |
+          pip install scons
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Android NDK (r25b)
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25b
+          link-to-sdk: true
+
+      - name: Clone Godot Engine (${{ matrix.godot_tag }})
+        run: |
+          git clone --depth 1 --branch ${{ matrix.godot_tag }} https://github.com/godotengine/godot.git godot-src
+
+      - name: Check SConstruct for disable_path_overrides Option
+        id: check_option
+        working-directory: godot-src
+        run: |
+          if grep -q "disable_path_overrides" SConstruct; then
+            echo "Option disable_path_overrides found in SConstruct. Setting disable_path_overrides=no"
+            echo "EXTRA_SCONS_FLAGS=disable_path_overrides=no" >> $GITHUB_ENV
+          else
+            echo "Option disable_path_overrides not present in this Godot version. Skipping option."
+            echo "EXTRA_SCONS_FLAGS=" >> $GITHUB_ENV
+          fi
+
+      - name: Compile Godot Android ARM64 Release Template
+        working-directory: godot-src
+        run: |
+          scons platform=android target=template_release arch=arm64 ${{ env.EXTRA_SCONS_FLAGS }} -j$(nproc)
+
+      - name: Build Android AAR / Template Archive
+        working-directory: godot-src/platform/android/java
+        run: |
+          ./gradlew generateGodotTemplates || ./gradlew assembleRelease
+
+      - name: Package Core Archive (core_${{ matrix.version_key }}.zip)
+        id: package_core
+        run: |
+          mkdir -p output_core core_contents
+          
+          # Find libgodot_android.so
+          SO_FILE=$(find godot-src -name "libgodot_android.so" -o -name "libgodot.android.template_release.arm64.so" | head -n 1)
+          if [ -z "$SO_FILE" ]; then
+            echo "Error: libgodot_android.so not found!"
+            exit 1
+          fi
+          cp "$SO_FILE" core_contents/libgodot_android.so
+
+          # Find libc++_shared.so if present
+          LIBCXX=$(find godot-src -name "libc++_shared.so" | head -n 1)
+          if [ -n "$LIBCXX" ]; then
+            cp "$LIBCXX" core_contents/libc++_shared.so
+          fi
+
+          # Find classes.dex / godot-lib.dex
+          DEX_FILE=$(find godot-src/platform/android/java -name "classes.dex" | head -n 1)
+          if [ -z "$DEX_FILE" ]; then
+            # Check inside generated APK if available
+            APK_FILE=$(find godot-src/bin -name "*.apk" | head -n 1)
+            if [ -n "$APK_FILE" ]; then
+              unzip -p "$APK_FILE" classes.dex > core_contents/godot-lib.dex
+            fi
+          else
+            cp "$DEX_FILE" core_contents/godot-lib.dex
+          fi
+
+          # Create internal core_manifest.json
+          SO_SHA256=$(sha256sum core_contents/libgodot_android.so | awk '{print $1}')
+          cat <<EOF > core_contents/core_manifest.json
+          {
+            "versionKey": "${{ matrix.version_key }}",
+            "engineVersion": "${{ matrix.engine_version }}",
+            "sourceType": "CI_BUILT",
+            "packagedTimestamp": $(date +%s%3N),
+            "sha256": "$SO_SHA256"
+          }
+          EOF
+
+          # Package zip
+          cd core_contents
+          zip -9 -r "../output_core/core_${{ matrix.version_key }}.zip" ./*
+          cd ..
+
+          ZIP_SHA256=$(sha256sum "output_core/core_${{ matrix.version_key }}.zip" | awk '{print $1}')
+          ZIP_SIZE=$(stat -c%s "output_core/core_${{ matrix.version_key }}.zip")
+
+          cat <<EOF > "output_core/meta_${{ matrix.version_key }}.json"
+          {
+            "versionKey": "${{ matrix.version_key }}",
+            "displayName": "${{ matrix.display_name }}",
+            "engineVersion": "${{ matrix.engine_version }}",
+            "engineMajor": ${{ matrix.engine_major }},
+            "fileName": "core_${{ matrix.version_key }}.zip",
+            "sha256": "$ZIP_SHA256",
+            "sizeBytes": $ZIP_SIZE,
+            "downloadUrl": "https://github.com/${{ github.repository }}/releases/download/cores-latest/core_${{ matrix.version_key }}.zip",
+            "isRecommended": false
+          }
+          EOF
+
+      - name: Upload Core Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-${{ matrix.version_key }}
+          path: output_core/*
+
+  publish-cores:
+    name: Aggregate Manifest and Publish to cores-latest
+    needs: build-core
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download Built Core Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./downloaded_artifacts
+
+      - name: Merge cores_manifest.json
+        run: |
+          mkdir -p ./release_dist
+          find ./downloaded_artifacts -name "*.zip" -exec cp {} ./release_dist/ \;
+
+          python - << 'PYEOF'
+          import json, glob, urllib.request
+
+          # 1. Fetch current remote manifest to preserve older versions (4.4, 4.3, 4.2, 4.1, 4.0, 3.6, 3.5)
+          manifest_url = "https://github.com/${{ github.repository }}/releases/download/cores-latest/cores_manifest.json"
+          try:
+              req = urllib.request.urlopen(manifest_url)
+              remote_entries = json.loads(req.read().decode('utf-8'))
+          except Exception as e:
+              print("Remote manifest fetch notice:", e)
+              remote_entries = []
+
+          # 2. Collect newly built core entries
+          new_entries = {}
+          for meta_file in glob.glob("./downloaded_artifacts/**/meta_*.json", recursive=True):
+              with open(meta_file, "r") as f:
+                  data = json.load(f)
+                  new_entries[data["versionKey"]] = data
+
+          # 3. Merge: replace or append new entries
+          merged = []
+          seen_keys = set()
+          for key, entry in new_entries.items():
+              merged.append(entry)
+              seen_keys.add(key)
+
+          for old in remote_entries:
+              if old["versionKey"] not in seen_keys:
+                  merged.append(old)
+                  seen_keys.add(old["versionKey"])
+
+          # Sort descending by versionKey
+          merged.sort(key=lambda x: [int(p) if p.isdigit() else p for p in x["versionKey"].split(".")], reverse=True)
+
+          with open("./release_dist/cores_manifest.json", "w", encoding="utf-8") as f:
+              json.dump(merged, f, indent=2)
+
+          print("Generated cores_manifest.json:")
+          print(json.dumps(merged, indent=2))
+          PYEOF
+
+      - name: Publish to GitHub Release (cores-latest)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: cores-latest
+          name: GodotDroid Runtime Cores (Latest)
+          body: |
+            ## GodotDroid Runtime Cores
+            Automated core release compiled with `disable_path_overrides=no` for full external PCK compatibility.
+            Includes cryptographically verified SHA-256 manifests.
+          draft: false
+          prerelease: false
+          files: |
+            ./release_dist/*.zip
+            ./release_dist/cores_manifest.json

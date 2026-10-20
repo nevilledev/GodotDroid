@@ -494,4 +494,153 @@ class PckVirtualPatcherTest {
         assertNotNull(pMount)
         assertArrayEquals(mountBytes, inspector.extractFileBytes(patchedPck, pMount!!))
     }
+
+    @Test
+    fun testPatchFormatV3_PreservesUnprefixedPaths() {
+        // Build synthetic PCK Format v3 where original entry has NO "res://" prefix (like project.binary)
+        val projectBinaryContent = "binary_project_data_payload_test"
+        val projectBytes = projectBinaryContent.toByteArray(Charsets.UTF_8)
+        val rawPath = "project.binary"
+        val pathBytes = rawPath.toByteArray(Charsets.UTF_8)
+        val paddedPathLen = ((pathBytes.size + 3) / 4) * 4
+
+        val headerSize = 40
+        val dataOffset = headerSize.toLong()
+        val dirOffset = dataOffset + projectBytes.size
+        val dirSize = 4 + (4 + paddedPathLen + 8 + 8 + 16 + 4)
+
+        val totalSize = dirOffset + dirSize
+        val bb = ByteBuffer.allocate(totalSize.toInt()).order(ByteOrder.LITTLE_ENDIAN)
+
+        // Header v3 (Godot 4.5/4.6)
+        bb.putInt(PckConstants.PCK_MAGIC)
+        bb.putInt(3) // v3
+        bb.putInt(4) // major
+        bb.putInt(6) // minor
+        bb.putInt(0) // patch
+        bb.putInt(0) // flags
+        bb.putLong(0L) // fileBase
+        bb.putLong(dirOffset)
+
+        // Payload
+        bb.put(projectBytes)
+
+        // Directory
+        bb.putInt(1) // 1 file
+        bb.putInt(pathBytes.size)
+        bb.put(pathBytes)
+        val pad = paddedPathLen - pathBytes.size
+        if (pad > 0) bb.put(ByteArray(pad))
+        bb.putLong(dataOffset)
+        bb.putLong(projectBytes.size.toLong())
+        bb.put(ByteArray(16) { 0x44.toByte() })
+        bb.putInt(0)
+
+        val originalPck = tempFolder.newFile("unprefixed_v3.pck")
+        FileOutputStream(originalPck).use { it.write(bb.array()) }
+
+        // Patch with override.cfg
+        val overrideContent = "[rendering]\nrenderer/rendering_method=\"gl_compatibility\"\n"
+        val overrideBytes = overrideContent.toByteArray(Charsets.UTF_8)
+
+        val patchedPck = tempFolder.newFile("unprefixed_v3_patched.pck")
+        val patchResult = patcher.patchPck(
+            sourceFile = originalPck,
+            targetFile = patchedPck,
+            injectedFiles = mapOf("res://override.cfg" to overrideBytes)
+        )
+
+        assertEquals(2, patchResult.totalFilesCount)
+        assertEquals(1, patchResult.injectedFilesCount)
+
+        val inspectPatched = inspector.inspect(patchedPck)
+        val binaryEntry = inspectPatched.files.find { it.rawPath == "project.binary" }
+        assertNotNull("project.binary must preserve rawPath without res:// prefix", binaryEntry)
+        assertEquals("project.binary", binaryEntry!!.rawPath)
+        assertArrayEquals(projectBytes, inspector.extractFileBytes(patchedPck, binaryEntry))
+
+        val overrideEntry = inspectPatched.files.find { it.rawPath == "override.cfg" }
+        assertNotNull("override.cfg must be injected without res:// prefix to match pack convention", overrideEntry)
+        assertEquals("override.cfg", overrideEntry!!.rawPath)
+        assertArrayEquals(overrideBytes, inspector.extractFileBytes(patchedPck, overrideEntry))
+    }
+
+    @Test
+    fun testPatchFormatV3_PreservesFormatV3_WhenTargetingGodotCore() {
+        // 1. Build synthetic PCK Format v3 (Godot 4.5)
+        val mainSceneContent = "[gd_scene format=3 uid=\"uid://test1234\"]\n"
+        val sceneBytes = mainSceneContent.toByteArray(Charsets.UTF_8)
+        val scenePath = "res://main.tscn"
+        val scenePathBytes = scenePath.toByteArray(Charsets.UTF_8)
+        val paddedPathLen = ((scenePathBytes.size + 3) / 4) * 4
+
+        val headerSize = 40
+        val dataOffset = headerSize.toLong()
+        val dirOffset = dataOffset + sceneBytes.size
+        val dirSize = 4 + (4 + paddedPathLen + 8 + 8 + 16 + 4)
+
+        val totalSize = dirOffset + dirSize
+        val bb = ByteBuffer.allocate(totalSize.toInt()).order(ByteOrder.LITTLE_ENDIAN)
+
+        // Header v3
+        bb.putInt(PckConstants.PCK_MAGIC)
+        bb.putInt(3) // v3
+        bb.putInt(4) // major 4
+        bb.putInt(5) // minor 5
+        bb.putInt(0) // patch 0
+        bb.putInt(0) // flags
+        bb.putLong(0L) // fileBase
+        bb.putLong(dirOffset) // dirOffset
+
+        // Payload data immediately after header
+        bb.put(sceneBytes)
+
+        // Directory table at dirOffset
+        bb.putInt(1) // 1 file
+        bb.putInt(scenePathBytes.size)
+        bb.put(scenePathBytes)
+        val pad = paddedPathLen - scenePathBytes.size
+        if (pad > 0) bb.put(ByteArray(pad))
+        bb.putLong(dataOffset) // rawOffset = dataOffset (fileBase is 0)
+        bb.putLong(sceneBytes.size.toLong())
+        bb.put(ByteArray(16) { 0x44.toByte() })
+        bb.putInt(0)
+
+        val originalPck = tempFolder.newFile("game_v3_to_patch.pck")
+        FileOutputStream(originalPck).use { it.write(bb.array()) }
+
+        // 2. Patch PCK targeting matching Godot 4.5 core
+        val overrideContent = "[rendering]\nrenderer/rendering_method=\"gl_compatibility\"\n"
+        val overrideBytes = overrideContent.toByteArray(Charsets.UTF_8)
+
+        val patchedPck = tempFolder.newFile("game_v3_patched.pck")
+        val patchResult = patcher.patchPck(
+            sourceFile = originalPck,
+            targetFile = patchedPck,
+            injectedFiles = mapOf("res://override.cfg" to overrideBytes),
+            targetEngineMajor = 4,
+            targetEngineMinor = 5
+        )
+
+        assertEquals("Format version must remain 3", 3, patchResult.formatVersion)
+        assertEquals(2, patchResult.totalFilesCount)
+        assertEquals(1, patchResult.injectedFilesCount)
+
+        // 3. Inspect patched PCK: verify inspector parses it as valid Format 3 PCK
+        val inspectPatched = inspector.inspect(patchedPck)
+        assertEquals("Inspected format version must be 3", 3, inspectPatched.header.formatVersion)
+        assertEquals("Engine major must be 4", 4, inspectPatched.header.engineMajor)
+        assertEquals("Engine minor must be 5", 5, inspectPatched.header.engineMinor)
+        assertEquals(2, inspectPatched.files.size)
+
+        val origScene = inspectPatched.files.find { it.path == "res://main.tscn" }
+        assertNotNull("main.tscn must be present", origScene)
+        val extractedScene = inspector.extractFileBytes(patchedPck, origScene!!)
+        assertArrayEquals("Extracted scene bytes must match original exactly", sceneBytes, extractedScene)
+
+        val overrideEntry = inspectPatched.files.find { it.path == "res://override.cfg" }
+        assertNotNull("override.cfg must be present", overrideEntry)
+        val extractedOverride = inspector.extractFileBytes(patchedPck, overrideEntry!!)
+        assertArrayEquals("Extracted override bytes must match", overrideBytes, extractedOverride)
+    }
 }

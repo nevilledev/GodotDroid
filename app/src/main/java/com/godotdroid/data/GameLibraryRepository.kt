@@ -23,6 +23,16 @@ class GameLibraryRepository(
     companion object {
         private const val TAG = "GameLibraryRepository"
         val COMPANION_EXTENSIONS = setOf("pck", "zip", "dll", "so", "dylib")
+
+        fun sanitizeFileName(name: String): String {
+            val extension = if (name.contains('.')) "." + name.substringAfterLast('.') else ""
+            val baseName = name.substringBeforeLast('.', name)
+            val normalized = java.text.Normalizer.normalize(baseName, java.text.Normalizer.Form.NFD)
+            val withoutDiacritics = normalized.replace("\\p{M}".toRegex(), "")
+            val cleanBase = withoutDiacritics.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+            val sanitized = (if (cleanBase.isBlank()) "game_${System.currentTimeMillis()}" else cleanBase) + extension
+            return sanitized
+        }
     }
 
     private val gamesDir = File(context.filesDir, "games").apply { mkdirs() }
@@ -61,12 +71,12 @@ class GameLibraryRepository(
                 SelectedFileInfo(uri, name, size)
             }
 
-            // Designate primary pack: prefer .exe, then game.pck, then largest .pck
+            // Designate primary pack: prefer .pck over .exe, then game.pck, then largest .pck
             fun score(info: SelectedFileInfo): Double {
                 val lower = info.name.lowercase()
                 var s = 0.0
-                if (lower.endsWith(".exe")) s += 1000.0
-                else if (lower.endsWith(".pck")) s += 100.0
+                if (lower.endsWith(".pck")) s += 1000.0
+                else if (lower.endsWith(".exe")) s += 500.0
                 else s += 1.0
 
                 if (lower == "game.pck" || lower.endsWith("/game.pck")) s += 50.0
@@ -83,11 +93,23 @@ class GameLibraryRepository(
 
             var primaryFile: File? = null
             for (info in fileInfos) {
-                val dest = File(targetDir, info.name)
+                val safeName = sanitizeFileName(info.name)
+                val dest = File(targetDir, safeName)
                 context.contentResolver.openInputStream(info.uri)?.use { input ->
                     FileOutputStream(dest).use { output ->
                         input.copyTo(output)
+                        output.flush()
+                        try { output.fd.sync() } catch (_: Throwable) {}
                     }
+                }
+                dest.setReadable(true, false)
+                if (dest.exists() && safeName != info.name) {
+                    try {
+                        val originalAlias = File(targetDir, info.name)
+                        if (!originalAlias.exists()) {
+                            android.system.Os.link(dest.absolutePath, originalAlias.absolutePath)
+                        }
+                    } catch (_: Throwable) {}
                 }
                 if (info == primaryInfo) {
                     primaryFile = dest
@@ -98,6 +120,28 @@ class GameLibraryRepository(
                 return@withContext Result.failure(IllegalStateException("Failed to stage primary game package"))
             }
 
+            // Normalize primary package: If source is an embedded Windows PE .exe, extract the standalone PCK directly into main.pck.
+            // If it is already a standalone .pck, normalize its name to main.pck so paths are clean ASCII and immune to Unicode/URI issues.
+            val pckInspector = com.godotdroid.pck.inspector.PckBinaryInspector()
+            try {
+                val header = pckInspector.inspectHeader(primaryFile)
+                val mainPck = File(targetDir, "main.pck")
+                if (header.isEmbeddedExe) {
+                    pckInspector.extractStandalonePck(primaryFile, mainPck, header)
+                    mainPck.setReadable(true, false)
+                    Log.i(TAG, "Carved standalone PCK (${mainPck.length()} bytes) from embedded EXE ${primaryFile.name}")
+                    primaryFile.delete()
+                    primaryFile = mainPck
+                } else if (primaryFile.name != "main.pck") {
+                    if (primaryFile.renameTo(mainPck)) {
+                        mainPck.setReadable(true, false)
+                        primaryFile = mainPck
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not normalize primary PCK: ${e.message}")
+            }
+
             // Auto-discover and copy all companion files (*.pck, *.zip, *.dll, *.so, *.dylib)
             // from the source parent directory so the user never has to copy companion files manually
             try {
@@ -106,14 +150,23 @@ class GameLibraryRepository(
                     val companions = parentDir.listFiles()?.filter { file ->
                         file.isFile &&
                         file.extension.lowercase() in COMPANION_EXTENSIONS &&
+                        !file.name.equals(primaryInfo.name, ignoreCase = true) &&
                         !file.name.equals(primaryFile.name, ignoreCase = true)
                     } ?: emptyList()
 
                     for (companion in companions) {
-                        val dest = File(targetDir, companion.name)
+                        val safeName = sanitizeFileName(companion.name)
+                        val dest = File(targetDir, safeName)
                         if (!dest.exists() || dest.length() != companion.length()) {
                             try {
                                 companion.copyTo(dest, overwrite = true)
+                                dest.setReadable(true, false)
+                                if (safeName != companion.name) {
+                                    val originalAlias = File(targetDir, companion.name)
+                                    if (!originalAlias.exists()) {
+                                        android.system.Os.link(dest.absolutePath, originalAlias.absolutePath)
+                                    }
+                                }
                                 Log.i(TAG, "Auto-copied companion file from source directory: ${companion.name} (${companion.length()} bytes)")
                             } catch (e: Exception) {
                                 Log.w(TAG, "Failed to auto-copy companion file ${companion.name}: ${e.message}")
@@ -164,13 +217,22 @@ class GameLibraryRepository(
                 ?: return@withContext Result.failure(IllegalStateException("Game directory not found"))
 
             for (uri in uris) {
-                val name = queryFileName(uri) ?: continue
-                val dest = File(targetDir, name)
+                val rawName = queryFileName(uri) ?: continue
+                val safeName = sanitizeFileName(rawName)
+                val dest = File(targetDir, safeName)
                 if (dest.exists()) dest.setWritable(true)
                 context.contentResolver.openInputStream(uri)?.use { input ->
                     FileOutputStream(dest).use { output ->
                         input.copyTo(output)
                     }
+                }
+                if (dest.exists() && safeName != rawName) {
+                    try {
+                        val originalAlias = File(targetDir, rawName)
+                        if (!originalAlias.exists()) {
+                            android.system.Os.link(dest.absolutePath, originalAlias.absolutePath)
+                        }
+                    } catch (_: Throwable) {}
                 }
             }
             Result.success(getCompanionFiles(game))

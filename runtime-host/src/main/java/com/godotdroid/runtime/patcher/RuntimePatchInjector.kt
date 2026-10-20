@@ -3,9 +3,12 @@ package com.godotdroid.runtime.patcher
 import android.content.Context
 import android.os.Environment
 import android.util.Log
+import com.godotdroid.pck.model.PckFileEntry
 import com.godotdroid.pck.model.PluginDependency
 import com.godotdroid.pck.model.RendererType
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 data class RuntimeEnvironment(
     val gameId: String,
@@ -61,12 +64,109 @@ class RuntimePatchInjector(private val context: Context) {
         audioDriver: String? = null,
         extraCliArgs: List<String> = emptyList()
     ): RuntimeEnvironment {
+        val effectiveEngineMajor = engineMajor
+        val effectiveEngineMinor = if (engineMajor == 4 && engineMinor >= 6) 5 else engineMinor
+
         val gameDir = File(runtimeBaseDir, gameId).apply { mkdirs() }
         val jniLibsDir = File(gameDir, "jniLibs").apply { mkdirs() }
+        val stagedPck = File(gameDir, "runtime_staged.pck")
+        var workingPckFile = pckOrExeFile
+
+        // Step 1: Detect Windows PE .exe ('MZ') and slice the embedded Godot PCK directly into runtime_staged.pck
+        val isPeExe = try {
+            java.io.RandomAccessFile(pckOrExeFile, "r").use { raf ->
+                if (raf.length() >= 2) {
+                    val b0 = raf.read()
+                    val b1 = raf.read()
+                    b0 == 0x4D && b1 == 0x5A
+                } else false
+            }
+        } catch (_: Exception) { false }
+
+        if (isPeExe) {
+            if (stagedPck.exists()) stagedPck.setWritable(true)
+            var sliced = false
+            try {
+                java.io.RandomAccessFile(pckOrExeFile, "r").use { srcRaf ->
+                    val srcChannel = srcRaf.channel
+                    val fileSize = srcChannel.size()
+                    if (fileSize >= 12) {
+                        val trailerBuf = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN)
+                        srcChannel.position(fileSize - 12)
+                        srcChannel.read(trailerBuf)
+                        trailerBuf.flip()
+                        val pckSize = trailerBuf.getLong()
+                        val magic = trailerBuf.getInt()
+                        if (magic == com.godotdroid.pck.inspector.PckConstants.PCK_MAGIC && pckSize in 1 until fileSize) {
+                            val embeddedStart = fileSize - 12L - pckSize
+                            java.io.RandomAccessFile(stagedPck, "rw").use { dstRaf ->
+                                val dstChannel = dstRaf.channel
+                                dstChannel.truncate(0)
+                                var transferred = 0L
+                                while (transferred < pckSize) {
+                                    val count = srcChannel.transferTo(
+                                        embeddedStart + transferred,
+                                        pckSize - transferred,
+                                        dstChannel
+                                    )
+                                    if (count <= 0) break
+                                    transferred += count
+                                }
+                                dstChannel.force(true)
+                            }
+                            sliced = true
+                        } else {
+                            Log.w(TAG, "PE trailer magic mismatch: 0x${Integer.toHexString(magic)}, pckSize: $pckSize")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Direct PE trailer slicing error: ${e.message}")
+            }
+
+            // Fallback: Use PckBinaryInspector extraction if trailer slicing did not succeed
+            if (!sliced || stagedPck.length() == 0L) {
+                try {
+                    val inspector = com.godotdroid.pck.inspector.PckBinaryInspector()
+                    val peHeader = inspector.inspectHeader(pckOrExeFile)
+                    if (peHeader.isEmbeddedExe) {
+                        inspector.extractStandalonePck(pckOrExeFile, stagedPck, peHeader)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Fallback inspector extraction failed: ${e.message}")
+                }
+            }
+
+            // Verify runtime_staged.pck starts with GDPC (0x43504447) at byte offset 0
+            val isPckValid = try {
+                if (stagedPck.exists() && stagedPck.length() >= 4) {
+                    java.io.RandomAccessFile(stagedPck, "r").use { raf ->
+                        val magicBuf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
+                        raf.channel.read(magicBuf)
+                        magicBuf.flip()
+                        magicBuf.getInt() == com.godotdroid.pck.inspector.PckConstants.PCK_MAGIC
+                    }
+                } else false
+            } catch (_: Exception) { false }
+
+            if (isPckValid) {
+                stagedPck.setReadable(true, false)
+                workingPckFile = stagedPck
+                Log.i(TAG, "Successfully sliced and verified standalone PCK (${stagedPck.length()} bytes) starting with GDPC at offset 0")
+                try {
+                    val aliasFile = File(gameDir, pckOrExeFile.name)
+                    if (!aliasFile.exists()) {
+                        android.system.Os.link(stagedPck.absolutePath, aliasFile.absolutePath)
+                    }
+                } catch (_: Throwable) {}
+            } else {
+                Log.e(TAG, "CRITICAL: runtime_staged.pck validation failed (does not start with GDPC magic)")
+            }
+        }
 
         // 1. Generate GodotSteam stub if requested
         if (injectSteamStub) {
-            SteamStubGenerator.writeStubToDirectory(gameDir, engineMajor)
+            SteamStubGenerator.writeStubToDirectory(gameDir, effectiveEngineMajor)
         }
 
         // 2. Stage companion sibling files (.pck, .dll, .so) from the game package's parent folder
@@ -163,31 +263,14 @@ class RuntimePatchInjector(private val context: Context) {
 
         val hasSiblingPcks = siblingPcks.isNotEmpty()
         if (hasSiblingPcks) {
-            CompanionPackMounterGenerator.writeScriptToDirectory(gameDir, siblingPcks, pckOrExeFile.name, engineMajor, gameDir.absolutePath)
+            CompanionPackMounterGenerator.writeScriptToDirectory(gameDir, siblingPcks, pckOrExeFile.name, effectiveEngineMajor, gameDir.absolutePath)
         }
 
-        // 3. Generate override.cfg
-        val overrideCfgFile = File(gameDir, "override.cfg")
-        if (overrideCfgFile.exists()) {
-            overrideCfgFile.setWritable(true)
-        }
-        val overrideContent = generateOverrideCfg(
-            renderer = selectedRenderer,
-            mainSceneOverride = mainSceneOverride,
-            injectSteamStub = injectSteamStub,
-            hasCompanionPcks = hasSiblingPcks,
-            engineMajor = engineMajor,
-            audioDriver = audioDriver
-        )
-        overrideCfgFile.writeText(overrideContent, Charsets.UTF_8)
-        overrideCfgFile.setReadOnly()
-
-        // 4. Stage any available Android ARM64 GDExtension libraries
-        stageGdExtensionLibraries(gameDir, jniLibsDir, plugins)
-
-        // 5. GDNative Stub Injection for Godot 3 (or any game relying on missing native scripts/optimizations)
+        // 3. Inspect PCK files (for GDNative scripts, project.binary autoload/UID overrides, and downscaling)
         val gdnsStubsToInject = mutableMapOf<String, ByteArray>()
         var hasGdNativeScripts = false
+        var projectBinaryOverrides = ProjectBinaryOverrides()
+
         val stubSoBytes = try {
             context.assets.open("stubs/libgdnative_stub.so").use { it.readBytes() }
         } catch (e: Exception) {
@@ -196,10 +279,12 @@ class RuntimePatchInjector(private val context: Context) {
         }
 
         try {
-            java.io.RandomAccessFile(pckOrExeFile, "r").use { raf ->
+            java.io.RandomAccessFile(workingPckFile, "r").use { raf ->
                 val channel = raf.channel
                 val inspector = com.godotdroid.pck.inspector.PckBinaryInspector()
                 val inspectResult = inspector.inspect(channel, channel.size())
+
+                // A. Check for GDNative scripts (Godot 3)
                 for (entry in inspectResult.files) {
                     val path = entry.path // e.g. "res://Native/NativeTest.gdns"
                     val cleanPath = path.removePrefix("/")
@@ -248,10 +333,51 @@ class RuntimePatchInjector(private val context: Context) {
                         }
                     }
                 }
+
+                // B. Check for project.binary or project.godot (Godot 4) to resolve any unresolvable UIDs
+                if (effectiveEngineMajor >= 4) {
+                    val projEntry = inspectResult.files.find {
+                        it.path == "res://project.binary" || it.rawPath == "project.binary" ||
+                        it.path == "res://project.godot" || it.rawPath == "project.godot"
+                    }
+                    if (projEntry != null) {
+                        val projBytes = inspector.extractFileBytes(channel, projEntry)
+                        val uidEntry = inspectResult.files.find {
+                            it.path == "res://.godot/uid_cache.bin" || it.rawPath == ".godot/uid_cache.bin"
+                        }
+                        val uidBytes = if (uidEntry != null) {
+                            try { inspector.extractFileBytes(channel, uidEntry) } catch (_: Exception) { null }
+                        } else null
+
+                        projectBinaryOverrides = resolveProjectBinaryOverrides(projBytes, inspectResult.files, uidBytes)
+                    }
+                }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Error inspecting PCK for GDNative scripts: ${e.message}")
+            Log.w(TAG, "Error inspecting PCK for scripts/UIDs: ${e.message}")
         }
+
+        // 4. Generate override.cfg
+        val overrideCfgFile = File(gameDir, "override.cfg")
+        if (overrideCfgFile.exists()) {
+            overrideCfgFile.setWritable(true)
+        }
+        val effectiveMainScene = mainSceneOverride ?: projectBinaryOverrides.mainScene
+        val overrideContent = generateOverrideCfg(
+            renderer = selectedRenderer,
+            mainSceneOverride = effectiveMainScene,
+            injectSteamStub = injectSteamStub,
+            hasCompanionPcks = hasSiblingPcks,
+            engineMajor = effectiveEngineMajor,
+            audioDriver = audioDriver,
+            busLayoutOverride = projectBinaryOverrides.busLayout,
+            extraAutoloads = projectBinaryOverrides.autoloads
+        )
+        overrideCfgFile.writeText(overrideContent, Charsets.UTF_8)
+        overrideCfgFile.setReadOnly()
+
+        // 5. Stage any available Android ARM64 GDExtension libraries
+        stageGdExtensionLibraries(gameDir, jniLibsDir, plugins)
 
         // Always stage libgodot_compat.so into runtime jniLibsDir for universal anti-crash protection
         try {
@@ -262,34 +388,64 @@ class RuntimePatchInjector(private val context: Context) {
             compatFile.setReadOnly()
         } catch (_: Exception) {}
 
-        // 6. Inject virtual files directly into the staged PCK ONLY when necessary (Steam stub, companion packs, GDNative stubs, in-PCK plugin rewriting, or version clamping)
-        var targetPckOrExe = pckOrExeFile
-        var needsPckPatching = injectSteamStub || plugins.any { it.configPath.isNotBlank() } || hasSiblingPcks || hasGdNativeScripts
-
-        // Check if PCK version is newer than target engine core or if source is an embedded Windows EXE
-        try {
-            val inspector = com.godotdroid.pck.inspector.PckBinaryInspector()
-            val header = inspector.inspectHeader(pckOrExeFile)
-            if (header.isEmbeddedExe ||
-                header.engineMajor > engineMajor ||
-                (header.engineMajor == engineMajor && header.engineMinor > engineMinor)
-            ) {
-                needsPckPatching = true
-            }
+        // 6. Stage standalone PCK and inject virtual files ONLY when necessary (Steam stub, companion packs, GDNative stubs, in-PCK plugin rewriting, or version clamping)
+        // 6. Stage standalone PCK and inject virtual files ONLY when necessary (Steam stub, companion packs, GDNative stubs, in-PCK plugin rewriting, or version clamping)
+        var targetPckOrExe = workingPckFile
+        val inspector = com.godotdroid.pck.inspector.PckBinaryInspector()
+        val header = try {
+            inspector.inspectHeader(workingPckFile)
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to inspect PCK header for version clamping: ${e.message}")
+            Log.w(TAG, "Failed to inspect PCK header: ${e.message}")
+            null
         }
 
-        if (needsPckPatching) {
+        val isEmbeddedExe = header?.isEmbeddedExe == true
+        val isVersionOlder = header != null && (
+            header.engineMajor > effectiveEngineMajor ||
+            (header.engineMajor == effectiveEngineMajor && header.engineMinor > effectiveEngineMinor)
+        )
+        val hasUidOverrides = projectBinaryOverrides.autoloads.isNotEmpty() ||
+            projectBinaryOverrides.mainScene != null ||
+            projectBinaryOverrides.busLayout != null
+
+        val needsVirtualInjection = injectSteamStub ||
+            plugins.any { it.configPath.isNotBlank() } ||
+            hasSiblingPcks ||
+            hasGdNativeScripts ||
+            isVersionOlder ||
+            hasUidOverrides
+
+        if (isEmbeddedExe && !needsVirtualInjection) {
+            // Fast direct extraction: Embedded Windows PE .exe contains a valid standalone GDPC archive.
+            try {
+                if (stagedPck.exists()) stagedPck.setWritable(true)
+                if (!stagedPck.exists() || stagedPck.length() == 0L) {
+                    inspector.extractStandalonePck(workingPckFile, stagedPck, header!!)
+                }
+                stagedPck.setReadable(true, false)
+                if (stagedPck.exists() && stagedPck.length() > 0) {
+                    targetPckOrExe = stagedPck
+                    Log.i(TAG, "Fast-path: extracted clean standalone PCK directly from embedded EXE (${stagedPck.length()} bytes)")
+                    try {
+                        val aliasFile = File(gameDir, pckOrExeFile.name)
+                        if (!aliasFile.exists()) {
+                            android.system.Os.link(stagedPck.absolutePath, aliasFile.absolutePath)
+                        }
+                    } catch (_: Throwable) {}
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Direct standalone PCK extraction failed: ${e.message}")
+            }
+        } else if (needsVirtualInjection) {
             try {
                 val filesToInject = mutableMapOf<String, ByteArray>()
                 filesToInject["res://override.cfg"] = overrideContent.toByteArray(Charsets.UTF_8)
                 if (injectSteamStub) {
-                    val stubContent = SteamStubGenerator.generateStub(engineMajor)
+                    val stubContent = SteamStubGenerator.generateStub(effectiveEngineMajor)
                     filesToInject["res://godotdroid_steam_stub.gd"] = stubContent.toByteArray(Charsets.UTF_8)
                 }
                 if (hasSiblingPcks) {
-                    val mountContent = CompanionPackMounterGenerator.generateMountScript(siblingPcks, pckOrExeFile.name, engineMajor, gameDir.absolutePath)
+                    val mountContent = CompanionPackMounterGenerator.generateMountScript(siblingPcks, pckOrExeFile.name, effectiveEngineMajor, gameDir.absolutePath)
                     filesToInject["res://godotdroid_companion_mount.gd"] = mountContent.toByteArray(Charsets.UTF_8)
                 }
                 if (hasGdNativeScripts) {
@@ -303,8 +459,7 @@ class RuntimePatchInjector(private val context: Context) {
                     if (plugin.configPath.isNotBlank()) {
                         var originalConfigText = ""
                         try {
-                            java.io.RandomAccessFile(pckOrExeFile, "r").use { raf ->
-                                val inspector = com.godotdroid.pck.inspector.PckBinaryInspector()
+                            java.io.RandomAccessFile(workingPckFile, "r").use { raf ->
                                 val inspectResult = inspector.inspect(raf.channel, raf.length())
                                 val entry = inspectResult.files.find { it.path == plugin.configPath }
                                 if (entry != null) {
@@ -315,24 +470,23 @@ class RuntimePatchInjector(private val context: Context) {
 
                         val patchedConfig = pluginCompat.patchExtensionConfigContent(
                             originalIni = originalConfigText,
-                            isGodot4 = (engineMajor >= 4),
+                            isGodot4 = (effectiveEngineMajor >= 4),
                             androidSoNames = plugin.androidLibraries.values.map { it.substringAfterLast('/') }.ifEmpty { listOf("${plugin.name}.so") }
                         )
                         filesToInject[plugin.configPath] = patchedConfig.toByteArray(Charsets.UTF_8)
                     }
                 }
 
-                val stagedPck = File(gameDir, "runtime_staged.pck")
                 if (stagedPck.exists()) stagedPck.setWritable(true)
                 val patcher = com.godotdroid.pck.patcher.PckVirtualPatcher()
                 patcher.patchPck(
-                    sourceFile = pckOrExeFile,
+                    sourceFile = workingPckFile,
                     targetFile = stagedPck,
                     injectedFiles = filesToInject,
-                    targetEngineMajor = engineMajor,
-                    targetEngineMinor = engineMinor
+                    targetEngineMajor = effectiveEngineMajor,
+                    targetEngineMinor = effectiveEngineMinor
                 )
-                stagedPck.setReadOnly()
+                stagedPck.setReadable(true, false)
                 if (stagedPck.exists() && stagedPck.length() > 0) {
                     targetPckOrExe = stagedPck
                     // Create an alias/hardlink matching the original filename in gameDir
@@ -346,10 +500,39 @@ class RuntimePatchInjector(private val context: Context) {
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Virtual PCK patch skipped or failed: ${e.message}")
-                targetPckOrExe = pckOrExeFile
+                if (isEmbeddedExe && header != null) {
+                    try {
+                        inspector.extractStandalonePck(workingPckFile, stagedPck, header)
+                        stagedPck.setReadable(true, false)
+                        if (stagedPck.exists() && stagedPck.length() > 0) {
+                            targetPckOrExe = stagedPck
+                        }
+                    } catch (_: Throwable) {}
+                } else {
+                    targetPckOrExe = workingPckFile
+                }
             }
         } else {
             Log.i(TAG, "Fast-path: launching game package directly via --main-pack without disk duplication")
+        }
+
+        // Final sanity verification: Ensure target package starts with GDPC magic (0x43504447)
+        if (targetPckOrExe.exists() && targetPckOrExe.length() >= 4) {
+            try {
+                java.io.RandomAccessFile(targetPckOrExe, "r").use { raf ->
+                    val magicBuf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
+                    raf.channel.read(magicBuf)
+                    magicBuf.flip()
+                    val magic = magicBuf.getInt()
+                    if (magic != com.godotdroid.pck.inspector.PckConstants.PCK_MAGIC) {
+                        Log.e(TAG, "CRITICAL: target package ${targetPckOrExe.name} does NOT begin with GDPC magic! Magic: 0x${Integer.toHexString(magic)}")
+                    } else {
+                        Log.i(TAG, "Verified target package ${targetPckOrExe.name} starts with GDPC magic (0x43504447)")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not verify final target package magic: ${e.message}")
+            }
         }
 
         // 5. Build CLI arguments
@@ -357,7 +540,7 @@ class RuntimePatchInjector(private val context: Context) {
             pckOrExeFile = targetPckOrExe,
             selectedRenderer = selectedRenderer,
             workingDir = gameDir,
-            engineMajor = engineMajor,
+            engineMajor = effectiveEngineMajor,
             audioDriver = audioDriver,
             extraArgs = extraCliArgs
         )
@@ -380,7 +563,9 @@ class RuntimePatchInjector(private val context: Context) {
         injectSteamStub: Boolean = false,
         hasCompanionPcks: Boolean = false,
         engineMajor: Int = 4,
-        audioDriver: String? = null
+        audioDriver: String? = null,
+        busLayoutOverride: String? = null,
+        extraAutoloads: Map<String, String> = emptyMap()
     ): String {
         val sb = StringBuilder()
         sb.appendLine("; GodotDroid Auto-Generated Runtime Compatibility Config")
@@ -448,7 +633,13 @@ class RuntimePatchInjector(private val context: Context) {
             sb.appendLine("run/main_scene=\"$mainSceneOverride\"")
         }
 
-        if (injectSteamStub || hasCompanionPcks) {
+        if (!busLayoutOverride.isNullOrBlank()) {
+            sb.appendLine()
+            sb.appendLine("[audio]")
+            sb.appendLine("buses/default_bus_layout=\"$busLayoutOverride\"")
+        }
+
+        if (injectSteamStub || hasCompanionPcks || extraAutoloads.isNotEmpty()) {
             sb.appendLine()
             sb.appendLine("[autoload]")
             if (injectSteamStub) {
@@ -457,9 +648,186 @@ class RuntimePatchInjector(private val context: Context) {
             if (hasCompanionPcks) {
                 sb.appendLine("GodotDroidCompanionMount=\"*res://godotdroid_companion_mount.gd\"")
             }
+            for ((name, path) in extraAutoloads) {
+                sb.appendLine("$name=\"$path\"")
+            }
         }
 
         return sb.toString()
+    }
+
+    data class ProjectBinaryOverrides(
+        val mainScene: String? = null,
+        val busLayout: String? = null,
+        val autoloads: Map<String, String> = emptyMap()
+    )
+
+    fun godotIdToText(pId: Long): String {
+        if (pId < 0) return "uid://<invalid>"
+        var id = pId
+        val base = 36L
+        val charCount = 26L
+        val sb = java.lang.StringBuilder()
+        while (id > 0) {
+            val c = (id % base).toInt()
+            if (c < charCount) {
+                sb.append(('a'.code + c).toChar())
+            } else {
+                sb.append(('0'.code + (c - charCount.toInt())).toChar())
+            }
+            id /= base
+        }
+        return "uid://${sb.reverse()}"
+    }
+
+    /**
+     * Resolves unresolvable or mismatched UIDs for autoloads, main_scene, and bus layout in Godot 4 games.
+     */
+    fun resolveProjectBinaryOverrides(
+        projBytes: ByteArray,
+        allFiles: List<PckFileEntry>,
+        uidCacheBytes: ByteArray? = null
+    ): ProjectBinaryOverrides {
+        val projText = String(projBytes, Charsets.ISO_8859_1)
+
+        val uidMap = mutableMapOf<String, String>()
+        if (uidCacheBytes != null && uidCacheBytes.size >= 4) {
+            try {
+                val buf = ByteBuffer.wrap(uidCacheBytes).order(ByteOrder.LITTLE_ENDIAN)
+                val count = buf.getInt()
+                for (i in 0 until count) {
+                    if (buf.remaining() < 12) break
+                    val id = buf.getLong()
+                    val len = buf.getInt()
+                    if (len < 0 || buf.remaining() < len) break
+                    val pathBytes = ByteArray(len)
+                    buf.get(pathBytes)
+                    val p = String(pathBytes, Charsets.UTF_8).trimEnd('\u0000').trim()
+                    val textUid = godotIdToText(id)
+                    uidMap[textUid] = p
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Error parsing uid_cache.bin: ${e.message}")
+            }
+        }
+
+        fun getBaseName(path: String): String {
+            val name = path.substringAfterLast('/')
+            val exts = listOf(".remap", ".gdc", ".gd", ".tscn", ".scn", ".res", ".tres")
+            var cur = name
+            for (ext in exts) {
+                if (cur.endsWith(ext, ignoreCase = true)) {
+                    cur = cur.dropLast(ext.length)
+                }
+            }
+            return cur.lowercase()
+        }
+
+        fun sanitizeResPath(raw: String): String {
+            var path = raw.trimEnd('\u0000').trim()
+            if (path.endsWith(".remap", ignoreCase = true)) {
+                path = path.dropLast(6)
+            }
+            if (path.endsWith(".gdc", ignoreCase = true)) {
+                path = path.dropLast(4) + ".gd"
+            }
+            if (!path.startsWith("res://") && !path.startsWith("user://")) {
+                path = "res://" + path.trimStart('/')
+            }
+            return path
+        }
+
+        // 1. Resolve Autoloads
+        val autoloadRegex = Regex("""autoload/([a-zA-Z0-9_]+)[\s\S]{1,40}?(\*?uid://[a-zA-Z0-9]{8,16})|([a-zA-Z0-9_]+)\s*=\s*"(\*?uid://[a-zA-Z0-9]{8,16})""")
+        val resolvedAutoloads = mutableMapOf<String, String>()
+        for (match in autoloadRegex.findAll(projText)) {
+            val name = match.groupValues[1].ifEmpty { match.groupValues[3] }
+            val fullUid = match.groupValues[2].ifEmpty { match.groupValues[4] }
+            if (name.isEmpty() || fullUid.isEmpty()) continue
+            val isSingleton = fullUid.startsWith("*")
+            val uid = fullUid.removePrefix("*")
+
+            var resolvedPath: String? = uidMap[uid]
+            if (resolvedPath == null) {
+                val target = name.lowercase()
+                val candidateFiles = allFiles.filter { getBaseName(it.rawPath) == target }
+                    .ifEmpty { allFiles.filter { getBaseName(it.rawPath).contains(target) } }
+                val best = candidateFiles.minWithOrNull(
+                    compareBy<PckFileEntry> {
+                        when {
+                            it.rawPath.contains(".tscn", ignoreCase = true) -> 0
+                            it.rawPath.contains(".gd", ignoreCase = true) -> 1
+                            else -> 2
+                        }
+                    }
+                )
+                if (best != null) {
+                    resolvedPath = sanitizeResPath(best.rawPath)
+                }
+            } else {
+                resolvedPath = sanitizeResPath(resolvedPath)
+            }
+
+            if (resolvedPath != null) {
+                resolvedAutoloads[name] = if (isSingleton) "*$resolvedPath" else resolvedPath
+                Log.i(TAG, "Resolved autoload $name ($uid) -> ${resolvedAutoloads[name]}")
+            }
+        }
+
+        // 2. Resolve Main Scene
+        val mainSceneRegex = Regex("""(?:application/run/main_scene|run/main_scene)[\s\S]{1,40}?(uid://[a-zA-Z0-9]{8,16})""")
+        var resolvedMainScene: String? = null
+        val mainMatch = mainSceneRegex.find(projText)
+        if (mainMatch != null) {
+            val uid = mainMatch.groupValues[1]
+            val pathFromMap = uidMap[uid]
+            if (pathFromMap != null) {
+                resolvedMainScene = sanitizeResPath(pathFromMap)
+            } else {
+                val mainCandidates = allFiles.filter {
+                    val p = it.rawPath.lowercase()
+                    (p.endsWith("main.tscn") || p.endsWith("main.tscn.remap") || p.endsWith("main.scn"))
+                }
+                val bestMain = mainCandidates.find { it.rawPath.endsWith(".remap", ignoreCase = true) }
+                    ?: mainCandidates.firstOrNull()
+                if (bestMain != null) {
+                    resolvedMainScene = sanitizeResPath(bestMain.rawPath)
+                }
+            }
+            if (resolvedMainScene != null) {
+                Log.i(TAG, "Resolved main_scene ($uid) -> $resolvedMainScene")
+            }
+        }
+
+        // 3. Resolve Default Bus Layout
+        val busLayoutRegex = Regex("""(?:audio/buses/default_bus_layout|buses/default_bus_layout)[\s\S]{1,40}?(uid://[a-zA-Z0-9]{8,16})""")
+        var resolvedBusLayout: String? = null
+        val busMatch = busLayoutRegex.find(projText)
+        if (busMatch != null) {
+            val uid = busMatch.groupValues[1]
+            val pathFromMap = uidMap[uid]
+            if (pathFromMap != null) {
+                resolvedBusLayout = sanitizeResPath(pathFromMap)
+            } else {
+                val busCandidates = allFiles.filter {
+                    it.rawPath.contains("default_bus_layout", ignoreCase = true)
+                }
+                val bestBus = busCandidates.find { it.rawPath.endsWith(".remap", ignoreCase = true) }
+                    ?: busCandidates.firstOrNull()
+                if (bestBus != null) {
+                    resolvedBusLayout = sanitizeResPath(bestBus.rawPath)
+                }
+            }
+            if (resolvedBusLayout != null) {
+                Log.i(TAG, "Resolved default_bus_layout ($uid) -> $resolvedBusLayout")
+            }
+        }
+
+        return ProjectBinaryOverrides(
+            mainScene = resolvedMainScene,
+            busLayout = resolvedBusLayout,
+            autoloads = resolvedAutoloads
+        )
     }
 
     /**
