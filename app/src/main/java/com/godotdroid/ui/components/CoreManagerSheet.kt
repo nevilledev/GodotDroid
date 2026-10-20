@@ -1,8 +1,10 @@
 package com.godotdroid.ui.components
 
+import android.content.pm.ApplicationInfo
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -353,78 +355,85 @@ fun CoreManagerSheet(
             )
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Registry Source URL Config Card
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(SurfaceCardDark)
-                    .border(1.dp, SurfaceVariantDark, RoundedCornerShape(10.dp))
-                    .padding(12.dp)
-            ) {
-                Column {
-                    Text(
-                        text = "Registry Source URL (GitHub Releases / CDN)",
-                        color = TextSecondaryDark,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
+            val context = LocalContext.current
+            val isDebuggable = remember(context) {
+                (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+            }
 
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        OutlinedTextField(
-                            value = registryUrlInput,
-                            onValueChange = { registryUrlInput = it },
-                            singleLine = true,
-                            textStyle = androidx.compose.ui.text.TextStyle(
-                                color = TextPrimaryDark,
-                                fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace
-                            ),
-                            colors = TextFieldDefaults.colors(
-                                focusedContainerColor = SurfaceVariantDark,
-                                unfocusedContainerColor = SurfaceVariantDark,
-                                focusedIndicatorColor = GodotBlue,
-                                unfocusedIndicatorColor = Color.Transparent
-                            ),
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(46.dp)
+            if (isDebuggable) {
+                // Registry Source URL Config Card (Debug Builds Only)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(SurfaceCardDark)
+                        .border(1.dp, SurfaceVariantDark, RoundedCornerShape(10.dp))
+                        .padding(12.dp)
+                ) {
+                    Column {
+                        Text(
+                            text = "Registry Source URL (Debug Override)",
+                            color = TextSecondaryDark,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
                         )
+                        Spacer(modifier = Modifier.height(6.dp))
 
-                        Spacer(modifier = Modifier.width(8.dp))
-
-                        Button(
-                            onClick = { onSyncRegistry(registryUrlInput) },
-                            enabled = !isSyncing && registryUrlInput.isNotBlank(),
-                            colors = ButtonDefaults.buttonColors(containerColor = GodotBlue),
-                            shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.height(46.dp)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            if (isSyncing) {
-                                CircularProgressIndicator(
-                                    color = Color.White,
-                                    strokeWidth = 2.dp,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Default.Sync,
-                                    contentDescription = "Sync",
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Sync", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            OutlinedTextField(
+                                value = registryUrlInput,
+                                onValueChange = { registryUrlInput = it },
+                                singleLine = true,
+                                textStyle = androidx.compose.ui.text.TextStyle(
+                                    color = TextPrimaryDark,
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace
+                                ),
+                                colors = TextFieldDefaults.colors(
+                                    focusedContainerColor = SurfaceVariantDark,
+                                    unfocusedContainerColor = SurfaceVariantDark,
+                                    focusedIndicatorColor = GodotBlue,
+                                    unfocusedIndicatorColor = Color.Transparent
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(46.dp)
+                            )
+
+                            Spacer(modifier = Modifier.width(8.dp))
+
+                            Button(
+                                onClick = { onSyncRegistry(registryUrlInput) },
+                                enabled = !isSyncing && registryUrlInput.isNotBlank(),
+                                colors = ButtonDefaults.buttonColors(containerColor = GodotBlue),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.height(46.dp)
+                            ) {
+                                if (isSyncing) {
+                                    CircularProgressIndicator(
+                                        color = Color.White,
+                                        strokeWidth = 2.dp,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Sync,
+                                        contentDescription = "Sync",
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Sync", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(14.dp))
+            }
 
             // Godot 4.x Cores
             val godot4Cores = distinctRegistry.filter { it.versionKey.startsWith("4.") }

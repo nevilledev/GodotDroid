@@ -82,6 +82,24 @@ GodotDroid supports the full spectrum of Godot Engine releases:
 
 ---
 
+## Tested Games & Compatibility Results
+
+The following table documents verification on physical ARM64 Android devices:
+
+| Game | Engine Version | Core | Result |
+| :--- | :--- | :--- | :--- |
+| **Café-Seduction** (`v0.2.1`) | Godot 4.6.3 (PCK v3) | 4.6 | **PASS** |
+| **Coerced Hero Chronicles** (`v0.2.1`) | Godot 4.5.0 (PCK v3) | 4.5 | **PASS** |
+| **Somatic Hex** | Godot 3.6.0 (PCK v1) | 3.6 | **PASS** |
+| **Rhythm Rider** | Godot 3.3.2 (PCK v1) | 3.3 | **PASS** |
+| **Princess Loves Goblin** | Godot 3.3.2 (PCK v1) | 3.3 | **PASS** |
+| **Screamer Creamer** | Godot 3.3.2 (PCK v1) | 3.3 | **PASS** |
+| **StripFlip** | Godot 3.3.2 (PCK v1) | 3.3 | **PASS** |
+| **SuccManor** | Godot 3.3.2 (PCK v1) | 3.3 | **PASS** |
+| **Kink's Quest** | Godot 3.5.x (PCK v1) | 3.5 | **PASS** |
+
+---
+
 ## Core Features in Detail
 
 ### 1. Modern Android Bionic Audio Deadlock Guard (`libgodot_compat.so`)

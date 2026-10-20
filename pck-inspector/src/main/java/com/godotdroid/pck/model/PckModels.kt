@@ -48,7 +48,8 @@ data class PckFileEntry(
     val fileOffset: Long,
     val size: Long,
     val md5: ByteArray,
-    val flags: Int = 0
+    val flags: Int = 0,
+    val rawPath: String = path
 ) {
     val isEncrypted: Boolean get() = (flags and 0x01) != 0
 
@@ -62,7 +63,8 @@ data class PckFileEntry(
                 fileOffset == other.fileOffset &&
                 size == other.size &&
                 flags == other.flags &&
-                md5.contentEquals(other.md5)
+                md5.contentEquals(other.md5) &&
+                rawPath == other.rawPath
     }
 
     override fun hashCode(): Int {
@@ -71,6 +73,7 @@ data class PckFileEntry(
         result = 31 * result + size.hashCode()
         result = 31 * result + md5.contentHashCode()
         result = 31 * result + flags
+        result = 31 * result + rawPath.hashCode()
         return result
     }
 }

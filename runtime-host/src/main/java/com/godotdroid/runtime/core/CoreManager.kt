@@ -1,6 +1,7 @@
 package com.godotdroid.runtime.core
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -58,10 +59,18 @@ class CoreManager(private val context: Context) {
     private val _registryCatalog = MutableStateFlow<List<CoreDescriptor>>(loadInitialCatalog())
     val registryCatalog: StateFlow<List<CoreDescriptor>> = _registryCatalog.asStateFlow()
 
+    fun isDebuggable(): Boolean {
+        return (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    }
+
     /**
      * Gets the configured custom or default GitHub registry base URL, sanitized.
+     * Custom URLs are only allowed in debuggable builds.
      */
     fun getRegistryBaseUrl(): String {
+        if (!isDebuggable()) {
+            return DEFAULT_REGISTRY_BASE_URL
+        }
         val raw = prefs.getString(PREF_REGISTRY_BASE_URL, DEFAULT_REGISTRY_BASE_URL) ?: DEFAULT_REGISTRY_BASE_URL
         val sanitized = sanitizeRegistryBaseUrl(raw)
         if (sanitized != raw) {
@@ -71,9 +80,13 @@ class CoreManager(private val context: Context) {
     }
 
     /**
-     * Updates the persistent custom GitHub registry base URL after sanitizing.
+     * Updates the persistent custom GitHub registry base URL after sanitizing (debug builds only).
      */
     fun setRegistryBaseUrl(url: String) {
+        if (!isDebuggable()) {
+            Log.w(TAG, "Custom registry URL can only be configured in debug builds")
+            return
+        }
         val sanitized = sanitizeRegistryBaseUrl(url)
         prefs.edit().putString(PREF_REGISTRY_BASE_URL, sanitized).apply()
     }
@@ -233,20 +246,16 @@ class CoreManager(private val context: Context) {
     }
 
     /**
-     * Finds matching installed core for an engine version (e.g. major=4, minor=3 -> "4.3").
+     * Finds matching installed core for an engine version by exact major.minor (e.g. major=4, minor=6 -> "4.6").
+     * Never falls back to a different minor version.
      */
     fun findMatchingCore(engineMajor: Int, engineMinor: Int): InstalledCore? {
         val targetKey = "$engineMajor.$engineMinor"
-        val exactMatch = getCore(targetKey)
-        if (exactMatch != null) return exactMatch
-
-        // Fallback: match by major version (e.g., any 4.x core if compatible)
-        val installed = getInstalledCores()
-        return installed.firstOrNull { it.versionKey.startsWith("$engineMajor.") }
+        return getCore(targetKey)
     }
 
     /**
-     * Retrieves an installed core by its version key (e.g., "4.3").
+     * Retrieves an installed core by its exact version key (e.g., "4.6").
      */
     fun getCore(versionKey: String): InstalledCore? {
         val dir = File(coresDir, versionKey)
@@ -438,7 +447,13 @@ class CoreManager(private val context: Context) {
         descriptor: CoreDescriptor,
         onProgress: ((DownloadProgress) -> Unit)? = null
     ): Result<InstalledCore> = withContext(Dispatchers.IO) {
-        val fixedUrl = descriptor.downloadUrl.replace("nevilledroid", "nevilledev", ignoreCase = true)
+        val baseConfigured = getRegistryBaseUrl()
+        val fixedUrl = if (baseConfigured != DEFAULT_REGISTRY_BASE_URL && descriptor.downloadUrl.contains("releases/download/cores-latest")) {
+            val fileName = "core_${descriptor.versionKey}.zip"
+            "$baseConfigured/$fileName"
+        } else {
+            descriptor.downloadUrl.replace("nevilledroid", "nevilledev", ignoreCase = true)
+        }
         Log.i(TAG, "Get tapped: versionKey=${descriptor.versionKey}, url=$fixedUrl")
 
         // If the downloadUrl points directly to godotengine release assets that are not .tpz or if blank, jump directly to TPZ range downloader
@@ -545,6 +560,15 @@ class CoreManager(private val context: Context) {
         descriptor: CoreDescriptor,
         onProgress: ((DownloadProgress) -> Unit)? = null
     ): Result<InstalledCore> = withContext(Dispatchers.IO) {
+        val parts = descriptor.versionKey.split('.')
+        val major = parts.getOrNull(0)?.toIntOrNull() ?: 4
+        val minor = parts.getOrNull(1)?.toIntOrNull() ?: 0
+        if (major > 4 || (major == 4 && minor >= 6)) {
+            val err = "Official Godot ${descriptor.versionKey} export templates reject external --main-pack arguments (disable_path_overrides=yes). A custom core compiled with disable_path_overrides=no is required."
+            Log.e(TAG, err)
+            return@withContext Result.failure(IllegalStateException(err))
+        }
+
         val targetApk = File(context.cacheDir, "temp_official_template_${descriptor.versionKey}_${System.currentTimeMillis()}.apk")
         try {
             val tpzResult = tpzRangeDownloader.downloadForVersion(
@@ -659,17 +683,19 @@ class CoreManager(private val context: Context) {
             ),
             CoreDescriptor(
                 versionKey = "4.6",
-                displayName = "Godot 4.6 Dev (PCK v4)",
-                engineVersion = "4.6.0",
+                displayName = "Godot 4.6.3 Stable (PCK v3)",
+                engineVersion = "4.6.3",
                 downloadUrl = "$DEFAULT_REGISTRY_BASE_URL/core_4.6.zip",
-                sizeBytes = 38_000_000L
+                sizeBytes = 25625879L,
+                sha256 = "739b21251ba42127bf9028384d09cd150252ef0f1a0cafbadea8852da630d165"
             ),
             CoreDescriptor(
                 versionKey = "4.5",
                 displayName = "Godot 4.5 Stable (PCK v3)",
                 engineVersion = "4.5.0",
                 downloadUrl = "$DEFAULT_REGISTRY_BASE_URL/core_4.5.zip",
-                sizeBytes = 37_000_000L
+                sizeBytes = 25411281L,
+                sha256 = "82bea9dd7f16f66fb95c242b8a87108581004d38287eaac261393e9f9a6b6caf"
             ),
             CoreDescriptor(
                 versionKey = "4.4",

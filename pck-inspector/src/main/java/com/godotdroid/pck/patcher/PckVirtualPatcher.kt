@@ -64,8 +64,12 @@ class PckVirtualPatcher(
         }
 
         if (initialHeader.isEmbeddedExe) {
-            cleanPck = File.createTempFile("godotdroid_carved_", ".pck")
+            cleanPck = File.createTempFile("godotdroid_carved_", ".pck", targetFile.parentFile)
             inspector.extractStandalonePck(sourceFile, cleanPck, initialHeader)
+            isTempCarved = true
+        } else if (sourceFile.canonicalPath == targetFile.canonicalPath) {
+            cleanPck = File.createTempFile("godotdroid_src_copy_", ".pck", targetFile.parentFile)
+            sourceFile.copyTo(cleanPck, overwrite = true)
             isTempCarved = true
         } else {
             cleanPck = sourceFile
@@ -95,7 +99,7 @@ class PckVirtualPatcher(
             val existingEntries = inspector.parseFileTable(srcChannel, header, srcLength)
 
             // Determine if the pack uses "res://" prefix (standard for Godot PCKs)
-            val usesResPrefix = existingEntries.isEmpty() || existingEntries.any { it.path.startsWith("res://") }
+            val usesResPrefix = existingEntries.any { it.rawPath.startsWith("res://") }
 
             fun normalizePath(p: String): String {
                 val clean = p.trim()
@@ -123,7 +127,16 @@ class PckVirtualPatcher(
 
             return when {
                 header.formatVersion in 1..2 -> {
-                    patchFormatV1V2(srcChannel, header, existingEntries, retainedEntries, preparedInjected, targetFile, targetEngineMajor, targetEngineMinor)
+                    patchFormatV1V2(
+                        srcChannel = srcChannel,
+                        header = header,
+                        existingEntries = existingEntries,
+                        retainedEntries = retainedEntries,
+                        injectedEntries = preparedInjected,
+                        targetFile = targetFile,
+                        targetEngineMajor = targetEngineMajor,
+                        targetEngineMinor = targetEngineMinor
+                    )
                 }
                 header.formatVersion >= 3 -> {
                     patchFormatV3V4(srcChannel, header, retainedEntries, preparedInjected, targetFile, targetEngineMajor, targetEngineMinor)
@@ -149,15 +162,15 @@ class PckVirtualPatcher(
         targetEngineMajor: Int? = null,
         targetEngineMinor: Int? = null
     ): PckPatchResult {
-        val formatVersion = header.formatVersion
-        val headerSize = if (formatVersion == 1) 0x54L else 0x60L
+        val outFormatVersion = header.formatVersion
+        val headerSize = if (outFormatVersion == 1) 0x54L else 0x60L
 
         // Calculate old directory size from existingEntries
-        val oldDirByteSize = 4L + existingEntries.sumOf { calculateEntryByteSize(it.path, formatVersion) }
+        val oldDirByteSize = 4L + existingEntries.sumOf { calculateEntryByteSize(it.rawPath, outFormatVersion) }
         
         // In format 2, Godot 8-byte aligns payload start (header.effectiveFileBase)
         // In format 1, payload start is the lowest file offset or immediately follows directory table
-        val oldPayloadStart = if (formatVersion >= 2 && header.effectiveFileBase > 0) {
+        val oldPayloadStart = if (outFormatVersion >= 2 && header.effectiveFileBase > 0) {
             header.effectiveFileBase
         } else {
             existingEntries.minOfOrNull { it.fileOffset } ?: (header.directoryOffset + oldDirByteSize)
@@ -165,11 +178,11 @@ class PckVirtualPatcher(
 
         // Calculate new directory size
         val allNewEntriesCount = retainedEntries.size + injectedEntries.size
-        val newDirByteSize = 4L + retainedEntries.sumOf { calculateEntryByteSize(it.path, formatVersion) } +
-                injectedEntries.sumOf { calculateEntryByteSize(it.path, formatVersion) }
+        val newDirByteSize = 4L + retainedEntries.sumOf { calculateEntryByteSize(it.rawPath, outFormatVersion) } +
+                injectedEntries.sumOf { calculateEntryByteSize(it.path, outFormatVersion) }
 
         // In format 2, Godot requires payload to start at an 8-byte aligned fileBase
-        val newFileBase = if (formatVersion == 2) {
+        val newFileBase = if (outFormatVersion == 2) {
             alignUp(headerSize + newDirByteSize, 8L)
         } else {
             headerSize + newDirByteSize
@@ -181,8 +194,8 @@ class PckVirtualPatcher(
         val finalEntries = mutableListOf<CompiledDirEntry>()
 
         for (old in retainedEntries) {
-            val cleanPath = old.path
-            val newRawOffset = if (formatVersion == 1) {
+            val cleanPath = old.rawPath
+            val newRawOffset = if (outFormatVersion == 1) {
                 newFileBase + (old.fileOffset - oldPayloadStart)
             } else {
                 old.fileOffset - oldPayloadStart
@@ -202,7 +215,7 @@ class PckVirtualPatcher(
         for (inj in injectedEntries) {
             val alignedActual = alignUp(curInjectedActual, 8L)
             val cleanPath = inj.path
-            val rawOffset = if (formatVersion == 1) {
+            val rawOffset = if (outFormatVersion == 1) {
                 alignedActual
             } else {
                 alignedActual - newFileBase
@@ -245,7 +258,7 @@ class PckVirtualPatcher(
                 }
             }
 
-            if (formatVersion == 2) {
+            if (outFormatVersion == 2) {
                 // Ensure PACK_REL_FILEBASE is set
                 val packFlags = header.packFlags or PckConstants.PACK_REL_FILEBASE
                 headerBuf.putInt(0x14, packFlags)
@@ -254,7 +267,7 @@ class PckVirtualPatcher(
             dstChannel.write(headerBuf)
 
             // 2. Write Directory Table immediately after header
-            writeDirectoryTable(dstChannel, formatVersion, finalEntries)
+            writeDirectoryTable(dstChannel, outFormatVersion, finalEntries)
 
             // 3. Pad up to newFileBase
             val writtenAfterDir = dstChannel.position()
@@ -304,7 +317,7 @@ class PckVirtualPatcher(
             totalFilesCount = retainedEntries.size + injectedEntries.size,
             injectedFilesCount = injectedEntries.size,
             outputFileSize = targetFile.length(),
-            formatVersion = formatVersion
+            formatVersion = outFormatVersion
         )
     }
 
@@ -361,6 +374,7 @@ class PckVirtualPatcher(
                     verBuf.flip()
                     dstChannel.position(0x08L)
                     dstChannel.write(verBuf)
+                    dstChannel.position(payloadRegionLength)
                 }
             }
 
@@ -393,7 +407,7 @@ class PckVirtualPatcher(
                 val rawOffset = old.fileOffset - header.effectiveFileBase
                 finalEntries.add(
                     CompiledDirEntry(
-                        path = old.path,
+                        path = old.rawPath,
                         rawOffset = rawOffset,
                         size = old.size,
                         md5 = old.md5,
