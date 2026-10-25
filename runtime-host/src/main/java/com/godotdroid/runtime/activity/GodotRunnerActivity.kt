@@ -206,12 +206,15 @@ class GodotRunnerActivity : FragmentActivity() {
                 return
             }
             if (report.missingAndroidPlugins.isNotEmpty()) {
-                val missingNames = report.missingAndroidPlugins.joinToString { it.name }
-                val errMsg = "Unsupported desktop GDExtension DLLs without Android ARM64 binaries ($missingNames)"
-                Log.e(TAG, errMsg)
-                Toast.makeText(this, errMsg, Toast.LENGTH_LONG).show()
-                finish()
-                return
+                val nonSteamMissing = report.missingAndroidPlugins.filterNot { it.isGodotSteam }
+                if (nonSteamMissing.isNotEmpty()) {
+                    val missingNames = nonSteamMissing.joinToString { it.name }
+                    val errMsg = "Unsupported desktop GDExtension DLLs without Android ARM64 binaries ($missingNames)"
+                    Log.e(TAG, errMsg)
+                    Toast.makeText(this, errMsg, Toast.LENGTH_LONG).show()
+                    finish()
+                    return
+                }
             }
         }
 
@@ -277,13 +280,17 @@ class GodotRunnerActivity : FragmentActivity() {
 
             Log.i(TAG, "Launching $gameTitle with core ${core.engineVersion} (${core.versionKey})")
 
+            val effectiveInjectSteamStub = injectSteamStub ||
+                (report?.hasGodotSteam == true) ||
+                (report?.missingAndroidPlugins?.any { it.isGodotSteam } == true)
+
             val environment = withContext(Dispatchers.IO) {
                 patchInjector.prepareRuntimeEnvironment(
                     gameId = gameId.ifBlank { "game_${System.currentTimeMillis()}" },
                     pckOrExeFile = targetFile,
                     selectedRenderer = renderer,
                     mainSceneOverride = mainSceneOverride,
-                    injectSteamStub = injectSteamStub,
+                    injectSteamStub = effectiveInjectSteamStub,
                     engineMajor = coreMajor,
                     engineMinor = coreMinor
                 )
@@ -335,6 +342,34 @@ class GodotRunnerActivity : FragmentActivity() {
                 Log.i(TAG, "Changed process working directory to: ${workingDir.absolutePath}")
             } catch (e: Throwable) {
                 Log.w(TAG, "Could not chdir to ${workingDir.absolutePath}: ${e.message}")
+            }
+
+            val mainPackArgIdx = environment.cliArgs.indexOf("--main-pack")
+            val resolvedMainPack = if (mainPackArgIdx != -1 && mainPackArgIdx + 1 < environment.cliArgs.size) {
+                environment.cliArgs[mainPackArgIdx + 1]
+            } else {
+                targetFile.absolutePath
+            }
+
+            // Structured launch diagnostics
+            Log.i(TAG, "================ GODOT ENGINE LAUNCH ================")
+            Log.i(TAG, "Core path loaded: ${core.coreDir.absolutePath} (Engine: ${core.engineVersion}, Core Key: ${core.versionKey})")
+            Log.i(TAG, "Main pack path passed: $resolvedMainPack")
+            Log.i(TAG, "Working directory (chdir): ${workingDir.absolutePath}")
+            Log.i(TAG, "Renderer requested vs resolved: Requested=$rendererName, Resolved=${renderer.name}")
+            Log.i(TAG, "All CLI arguments: ${environment.cliArgs.joinToString(" ")}")
+            Log.i(TAG, "=====================================================")
+
+            try {
+                val workingDirOverride = File(workingDir, "override.cfg")
+                if (workingDir.canonicalPath != environment.runtimeDir.canonicalPath) {
+                    if (workingDirOverride.exists()) workingDirOverride.setWritable(true)
+                    environment.overrideCfgFile.copyTo(workingDirOverride, overwrite = true)
+                    workingDirOverride.setReadable(true, false)
+                    Log.i(TAG, "Mirrored override.cfg to working directory: ${workingDirOverride.absolutePath}")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not mirror override.cfg to workingDir: ${e.message}")
             }
 
             val result = dynamicLoader.loadAndInitialize(

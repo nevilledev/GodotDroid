@@ -34,6 +34,7 @@ data class SavedGameItem(
         reportObj.put("detectedRenderer", report.detectedRenderer.name)
         reportObj.put("usesDotNet", report.usesDotNet)
         reportObj.put("hasGodotSteam", report.hasGodotSteam)
+        reportObj.put("hasDesktopTextures", report.hasDesktopTextures)
         reportObj.put("isEncrypted", report.isEncrypted)
 
         // Header
@@ -158,6 +159,7 @@ data class SavedGameItem(
                 plugins = plugins,
                 missingAndroidPlugins = missingAndroidPlugins,
                 hasGodotSteam = reportObj.optBoolean("hasGodotSteam", false),
+                hasDesktopTextures = reportObj.optBoolean("hasDesktopTextures", false),
                 isEncrypted = reportObj.optBoolean("isEncrypted", false)
             )
 

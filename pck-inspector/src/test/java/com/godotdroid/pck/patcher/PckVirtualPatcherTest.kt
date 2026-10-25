@@ -643,4 +643,56 @@ class PckVirtualPatcherTest {
         val extractedOverride = inspector.extractFileBytes(patchedPck, overrideEntry!!)
         assertArrayEquals("Extracted override bytes must match", overrideBytes, extractedOverride)
     }
+
+    @Test
+    fun testNormalizeDesktopTextureImports() {
+        val importContent = "[remap]\n\nimporter=\"texture\"\ntype=\"CompressedTexture2D\"\npath.s3tc=\"res://test.s3tc.ctex\"\n"
+        val importBytes = importContent.toByteArray(Charsets.UTF_8)
+        val importPath = "res://test.png.import"
+        val importPathBytes = importPath.toByteArray(Charsets.UTF_8)
+        val paddedPathLen = ((importPathBytes.size + 3) / 4) * 4
+
+        val headerSize = 96
+        val dirSize = 4 + (4 + paddedPathLen + 8 + 8 + 16 + 4)
+        val dataOffset = (headerSize + dirSize).toLong()
+
+        val totalSize = dataOffset + importBytes.size
+        val bb = ByteBuffer.allocate(totalSize.toInt()).order(ByteOrder.LITTLE_ENDIAN)
+
+        // Header v2
+        bb.putInt(PckConstants.PCK_MAGIC)
+        bb.putInt(2)
+        bb.putInt(4)
+        bb.putInt(2)
+        bb.putInt(0)
+        bb.putInt(PckConstants.PACK_REL_FILEBASE)
+        bb.putLong(0L)
+        bb.put(ByteArray(64))
+
+        // Directory
+        bb.putInt(1)
+        bb.putInt(importPathBytes.size)
+        bb.put(importPathBytes)
+        val pad = paddedPathLen - importPathBytes.size
+        if (pad > 0) bb.put(ByteArray(pad))
+        bb.putLong(dataOffset)
+        bb.putLong(importBytes.size.toLong())
+        bb.put(ByteArray(16) { 0x33.toByte() })
+        bb.putInt(0)
+
+        // Data
+        bb.put(importBytes)
+
+        val testPck = tempFolder.newFile("test_import.pck")
+        FileOutputStream(testPck).use { it.write(bb.array()) }
+
+        val modifiedCount = patcher.normalizeDesktopTextureImports(testPck)
+        assertEquals("One import file should be modified", 1, modifiedCount)
+
+        val insp = inspector.inspect(testPck)
+        val entry = insp.files.first { it.path == "res://test.png.import" }
+        val extracted = String(inspector.extractFileBytes(testPck, entry), Charsets.UTF_8)
+        assertTrue("path=     \" must be present", extracted.contains("path=     \"res://test.s3tc.ctex\""))
+        assertTrue("path.s3tc must not be present", !extracted.contains("path.s3tc="))
+    }
 }

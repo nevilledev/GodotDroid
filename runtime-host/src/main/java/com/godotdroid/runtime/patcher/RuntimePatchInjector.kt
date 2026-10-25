@@ -245,15 +245,19 @@ class RuntimePatchInjector(private val context: Context) {
                     "dll", "so", "dylib" -> {
                         // Copy companion native library to core/plugin native library directory (jniLibs)
                         val destJniLib = File(jniLibsDir, sibling.name)
-                        if (destJniLib.exists()) destJniLib.setWritable(true)
-                        sibling.copyTo(destJniLib, overwrite = true)
-                        destJniLib.setReadOnly()
+                        if (destJniLib.canonicalPath != sibling.canonicalPath) {
+                            if (destJniLib.exists()) destJniLib.setWritable(true)
+                            sibling.copyTo(destJniLib, overwrite = true)
+                            destJniLib.setReadOnly()
+                        }
 
                         // Also copy to gameDir so relative lookups next to the main pack succeed
                         val destGameDirLib = File(gameDir, sibling.name)
-                        if (destGameDirLib.exists()) destGameDirLib.setWritable(true)
-                        sibling.copyTo(destGameDirLib, overwrite = true)
-                        destGameDirLib.setReadOnly()
+                        if (destGameDirLib.canonicalPath != sibling.canonicalPath) {
+                            if (destGameDirLib.exists()) destGameDirLib.setWritable(true)
+                            sibling.copyTo(destGameDirLib, overwrite = true)
+                            destGameDirLib.setReadOnly()
+                        }
 
                         Log.i(TAG, "Copied companion native library: ${sibling.name} -> ${destJniLib.absolutePath}")
                     }
@@ -399,6 +403,13 @@ class RuntimePatchInjector(private val context: Context) {
             null
         }
 
+        val hasDesktopTextures = try {
+            java.io.RandomAccessFile(workingPckFile, "r").use { raf ->
+                val insp = inspector.inspect(raf.channel, raf.length())
+                insp.files.any { it.path.endsWith(".s3tc.ctex", ignoreCase = true) || it.path.endsWith(".bptc.ctex", ignoreCase = true) }
+            }
+        } catch (_: Exception) { false }
+
         val isEmbeddedExe = header?.isEmbeddedExe == true
         val isVersionOlder = header != null && (
             header.engineMajor > effectiveEngineMajor ||
@@ -412,6 +423,7 @@ class RuntimePatchInjector(private val context: Context) {
             plugins.any { it.configPath.isNotBlank() } ||
             hasSiblingPcks ||
             hasGdNativeScripts ||
+            hasDesktopTextures ||
             isVersionOlder ||
             hasUidOverrides
 
@@ -516,6 +528,17 @@ class RuntimePatchInjector(private val context: Context) {
             Log.i(TAG, "Fast-path: launching game package directly via --main-pack without disk duplication")
         }
 
+        if (hasDesktopTextures && targetPckOrExe.exists()) {
+            try {
+                if (!targetPckOrExe.canWrite()) targetPckOrExe.setWritable(true)
+                val texturePatcher = com.godotdroid.pck.patcher.PckVirtualPatcher()
+                val normalizedCount = texturePatcher.normalizeDesktopTextureImports(targetPckOrExe)
+                Log.i(TAG, "Normalized $normalizedCount desktop texture import(s) in ${targetPckOrExe.name}")
+            } catch (e: Exception) {
+                Log.w(TAG, "Desktop texture normalization skipped: ${e.message}")
+            }
+        }
+
         // Final sanity verification: Ensure target package starts with GDPC magic (0x43504447)
         if (targetPckOrExe.exists() && targetPckOrExe.length() >= 4) {
             try {
@@ -571,6 +594,8 @@ class RuntimePatchInjector(private val context: Context) {
         sb.appendLine("; GodotDroid Auto-Generated Runtime Compatibility Config")
 
         if (engineMajor >= 4) {
+            sb.appendLine("_custom_features=\"s3tc,bptc\"")
+            sb.appendLine()
             sb.appendLine("[rendering]")
             when (renderer) {
                 RendererType.GL_COMPATIBILITY, RendererType.GLES2, RendererType.GLES3 -> {

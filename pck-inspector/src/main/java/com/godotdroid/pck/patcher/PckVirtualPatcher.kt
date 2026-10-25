@@ -533,6 +533,61 @@ class PckVirtualPatcher(
         return 4L + readLen + metaSize
     }
 
+    /**
+     * Normalizes desktop-specific VRAM texture import configurations in-place within a PCK file.
+     * Replaces desktop conditional tags `path.s3tc="` and `path.bptc="` with unconditional `path=     "`
+     * so that the Godot resource loader resolves desktop textures on Android platforms
+     * without altering file offsets, table directory structures, or entry sizes.
+     */
+    fun normalizeDesktopTextureImports(pckFile: File): Int {
+        if (!pckFile.exists() || pckFile.length() < 100) return 0
+        var modifiedCount = 0
+        java.io.RandomAccessFile(pckFile, "rw").use { raf ->
+            val channel = raf.channel
+            val header = inspector.parseHeader(channel, 0L, false, channel.size())
+            val pckResult = inspector.parseFileTable(channel, header, channel.size())
+            val importFiles = pckResult.filter { it.path.endsWith(".import", ignoreCase = true) }
+
+            val s3tcPattern = "path.s3tc=\"".toByteArray(Charsets.UTF_8)
+            val bptcPattern = "path.bptc=\"".toByteArray(Charsets.UTF_8)
+            val replacement = "path=     \"".toByteArray(Charsets.UTF_8) // exactly 11 bytes
+
+            for (entry in importFiles) {
+                if (entry.size <= 0 || entry.size > 65536) continue
+                raf.seek(entry.fileOffset)
+                val buffer = ByteArray(entry.size.toInt())
+                raf.readFully(buffer)
+
+                var modified = false
+                var i = 0
+                while (i <= buffer.size - 11) {
+                    if (isPatternAt(buffer, i, s3tcPattern) || isPatternAt(buffer, i, bptcPattern)) {
+                        System.arraycopy(replacement, 0, buffer, i, 11)
+                        modified = true
+                        i += 11
+                    } else {
+                        i++
+                    }
+                }
+
+                if (modified) {
+                    raf.seek(entry.fileOffset)
+                    raf.write(buffer)
+                    modifiedCount++
+                }
+            }
+        }
+        return modifiedCount
+    }
+
+    private fun isPatternAt(buf: ByteArray, offset: Int, pattern: ByteArray): Boolean {
+        if (offset + pattern.size > buf.size) return false
+        for (j in pattern.indices) {
+            if (buf[offset + j] != pattern[j]) return false
+        }
+        return true
+    }
+
     private fun alignUp(value: Long, alignment: Long): Long {
         val rem = value % alignment
         return if (rem == 0L) value else value + (alignment - rem)

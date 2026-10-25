@@ -28,11 +28,11 @@ class GameCompatibilityAnalyzer(
 
             val parentDir = file.parentFile
             val hasExternalDotNet = detectExternalDotNetFolder(parentDir, file.nameWithoutExtension)
-            return if (hasExternalDotNet) {
-                report.copy(usesDotNet = true)
-            } else {
-                report
-            }
+            val hasExternalSteam = detectExternalSteam(parentDir)
+            return report.copy(
+                usesDotNet = report.usesDotNet || hasExternalDotNet,
+                hasGodotSteam = report.hasGodotSteam || hasExternalSteam
+            )
         }
     }
 
@@ -41,6 +41,15 @@ class GameCompatibilityAnalyzer(
          * Detects desktop Mono / .NET assemblies located in sibling directories next to the executable,
          * such as `data_<name>/`, `<name>_Data/`, `mono/`, or loose `.dll` assemblies.
          */
+        fun detectExternalSteam(parentDir: File?): Boolean {
+            if (parentDir == null || !parentDir.exists() || !parentDir.isDirectory) return false
+            val siblingFiles = parentDir.listFiles() ?: return false
+            return siblingFiles.any { sib ->
+                val name = sib.name.lowercase()
+                name.contains("steam_api") || name.contains("godotsteam") || name == "steam_appid.txt"
+            }
+        }
+
         fun detectExternalDotNetFolder(parentDir: File?, baseName: String): Boolean {
             if (parentDir == null || !parentDir.exists() || !parentDir.isDirectory) return false
 
@@ -192,12 +201,21 @@ class GameCompatibilityAnalyzer(
             }
         }
 
-        // Also check if any standalone Steam libraries exist anywhere in the package
+        // Also check if any standalone Steam libraries or scripts exist anywhere in the package
         if (!hasGodotSteam) {
             hasGodotSteam = files.any { entry ->
                 val p = entry.path.lowercase()
-                p.contains("godotsteam") || p.contains("steam_api") || p.contains("libgodotsteam")
+                p.contains("godotsteam") || p.contains("steam_api") || p.contains("libgodotsteam") ||
+                        p.endsWith("/steam.gd") || p == "res://steam.gd" || p.contains("/steam/")
             }
+        }
+
+
+
+        // Check for desktop VRAM compressed textures (S3TC/BPTC)
+        val hasDesktopTextures = files.any { entry ->
+            val p = entry.path.lowercase()
+            p.endsWith(".s3tc.ctex") || p.endsWith(".bptc.ctex")
         }
 
         // 3. C# / Mono (.NET) Detection
@@ -222,6 +240,7 @@ class GameCompatibilityAnalyzer(
             plugins = plugins,
             missingAndroidPlugins = missingAndroidPlugins,
             hasGodotSteam = hasGodotSteam,
+            hasDesktopTextures = hasDesktopTextures,
             isEncrypted = false
         )
     }
