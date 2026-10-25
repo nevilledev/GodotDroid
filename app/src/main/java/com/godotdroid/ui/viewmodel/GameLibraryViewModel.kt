@@ -6,22 +6,27 @@ import android.content.Intent
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.godotdroid.data.FolderImportProgress
 import com.godotdroid.data.GameLibraryRepository
 import com.godotdroid.data.SavedGameItem
 import com.godotdroid.pck.inspector.PckBinaryInspector
 import com.godotdroid.pck.model.RendererType
+import com.godotdroid.pck.scanner.FolderScanResult
+import com.godotdroid.pck.scanner.GameCandidate
 import com.godotdroid.runtime.activity.GodotRunnerActivity
 import com.godotdroid.runtime.core.CoreDescriptor
 import com.godotdroid.runtime.core.CoreManager
 import com.godotdroid.runtime.core.DownloadProgress
 import com.godotdroid.runtime.core.InstalledCore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -41,6 +46,19 @@ sealed class UiEvent {
     data class LaunchGame(val intent: Intent) : UiEvent()
 }
 
+data class PendingCandidateChoice(
+    val scanResult: FolderScanResult,
+    val candidates: List<GameCandidate>
+)
+
+data class ImportSummaryData(
+    val game: SavedGameItem,
+    val scanResult: FolderScanResult,
+    val selectedCandidate: GameCandidate,
+    val matchingCoreKey: String,
+    val isCoreInstalled: Boolean
+)
+
 class GameLibraryViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = GameLibraryRepository(application.applicationContext)
@@ -55,6 +73,20 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
 
     private val _isImporting = MutableStateFlow(false)
     val isImporting: StateFlow<Boolean> = _isImporting.asStateFlow()
+
+    private var folderImportJob: Job? = null
+
+    private val _isFolderImporting = MutableStateFlow(false)
+    val isFolderImporting: StateFlow<Boolean> = _isFolderImporting.asStateFlow()
+
+    private val _folderImportProgress = MutableStateFlow<FolderImportProgress?>(null)
+    val folderImportProgress: StateFlow<FolderImportProgress?> = _folderImportProgress.asStateFlow()
+
+    private val _pendingCandidateChoice = MutableStateFlow<PendingCandidateChoice?>(null)
+    val pendingCandidateChoice: StateFlow<PendingCandidateChoice?> = _pendingCandidateChoice.asStateFlow()
+
+    private val _pendingImportSummary = MutableStateFlow<ImportSummaryData?>(null)
+    val pendingImportSummary: StateFlow<ImportSummaryData?> = _pendingImportSummary.asStateFlow()
 
     private val _selectedGame = MutableStateFlow<SavedGameItem?>(null)
     val selectedGame: StateFlow<SavedGameItem?> = _selectedGame.asStateFlow()
@@ -104,6 +136,139 @@ class GameLibraryViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch {
             coreManager.refreshInstalledCores()
         }
+    }
+
+    fun cancelFolderImport() {
+        folderImportJob?.cancel()
+        folderImportJob = null
+        _isFolderImporting.value = false
+        _folderImportProgress.value = null
+        viewModelScope.launch {
+            _uiEvents.emit(UiEvent.ShowMessage("Import cancelled"))
+        }
+    }
+
+    fun importGameFolder(uri: Uri) {
+        folderImportJob?.cancel()
+        folderImportJob = viewModelScope.launch {
+            _isFolderImporting.value = true
+            _folderImportProgress.value = null
+            _pendingCandidateChoice.value = null
+            _pendingImportSummary.value = null
+
+            val result = repository.importGameFolder(
+                treeUri = uri,
+                onProgress = { progress -> _folderImportProgress.value = progress },
+                isCancelled = { !isActive }
+            )
+
+            _isFolderImporting.value = false
+            _folderImportProgress.value = null
+
+            result.onSuccess { scanResult ->
+                when {
+                    scanResult.candidates.size > 1 -> {
+                        _pendingCandidateChoice.value = PendingCandidateChoice(scanResult, scanResult.candidates)
+                    }
+                    scanResult.candidates.size == 1 -> {
+                        selectCandidateAndFinalize(scanResult, scanResult.candidates.first())
+                    }
+                    else -> {
+                        _uiEvents.emit(UiEvent.ShowMessage("No Godot game file found in selected folder"))
+                    }
+                }
+            }.onFailure { error ->
+                if (error !is kotlinx.coroutines.CancellationException) {
+                    _uiEvents.emit(UiEvent.ShowMessage("Folder import failed: ${error.message}"))
+                }
+            }
+        }
+    }
+
+    fun chooseCandidate(candidate: GameCandidate) {
+        val choice = _pendingCandidateChoice.value ?: return
+        _pendingCandidateChoice.value = null
+        selectCandidateAndFinalize(choice.scanResult, candidate)
+    }
+
+    fun dismissCandidateChooser() {
+        val choice = _pendingCandidateChoice.value
+        _pendingCandidateChoice.value = null
+        if (choice != null) {
+            viewModelScope.launch {
+                repository.cancelFolderImport(choice.scanResult)
+                _uiEvents.emit(UiEvent.ShowMessage("Import cancelled"))
+            }
+        }
+    }
+
+    private fun selectCandidateAndFinalize(scanResult: FolderScanResult, candidate: GameCandidate) {
+        viewModelScope.launch {
+            _isLoading.value = true
+            val result = repository.finalizeFolderImport(scanResult, candidate)
+            _isLoading.value = false
+
+            result.onSuccess { item ->
+                _games.value = repository.getGames()
+                _selectedGame.value = item
+                val major = item.report.pckHeader.engineMajor
+                val minor = item.report.pckHeader.engineMinor
+                val versionKey = "$major.$minor"
+                val isInstalled = coreManager.getCore(versionKey) != null
+                _pendingImportSummary.value = ImportSummaryData(
+                    game = item,
+                    scanResult = scanResult,
+                    selectedCandidate = candidate,
+                    matchingCoreKey = versionKey,
+                    isCoreInstalled = isInstalled
+                )
+            }.onFailure { error ->
+                _uiEvents.emit(UiEvent.ShowMessage("Failed to finalize game: ${error.message}"))
+            }
+        }
+    }
+
+    fun dismissImportSummary() {
+        _pendingImportSummary.value = null
+    }
+
+    fun downloadCoreFromSummary(versionKey: String) {
+        viewModelScope.launch {
+            _isDownloadingCore.value = true
+            _coreErrorMessage.value = null
+
+            val descriptor = coreManager.getRegistryCatalog().firstOrNull { it.versionKey == versionKey }
+                ?: CoreDescriptor(
+                    versionKey = versionKey,
+                    displayName = "Godot $versionKey",
+                    engineVersion = "$versionKey.0",
+                    downloadUrl = "${coreManager.getRegistryBaseUrl()}/core_$versionKey.zip"
+                )
+
+            val result = coreManager.downloadCore(
+                descriptor = descriptor,
+                onProgress = { progress -> _downloadProgress.value = progress }
+            )
+
+            _isDownloadingCore.value = false
+            _downloadProgress.value = null
+
+            result.onSuccess { core ->
+                refreshCores()
+                _pendingImportSummary.value = _pendingImportSummary.value?.copy(isCoreInstalled = true)
+                _uiEvents.emit(UiEvent.ShowMessage("Godot $versionKey core successfully installed!"))
+            }.onFailure { error ->
+                val msg = "Core download failed: ${error.message}"
+                _coreErrorMessage.value = msg
+                _uiEvents.emit(UiEvent.ShowMessage(msg))
+            }
+        }
+    }
+
+    fun launchFromSummary(context: Context) {
+        val summary = _pendingImportSummary.value ?: return
+        _pendingImportSummary.value = null
+        launchGame(context, summary.game)
     }
 
     fun importGame(uri: Uri) = importGames(listOf(uri))

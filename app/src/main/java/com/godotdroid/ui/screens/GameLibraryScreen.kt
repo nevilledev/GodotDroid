@@ -1,10 +1,15 @@
 package com.godotdroid.ui.screens
 
 import android.content.Context
+import android.content.Intent
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -63,15 +68,20 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.godotdroid.data.SavedGameItem
 import com.godotdroid.pck.model.RendererType
+import com.godotdroid.pck.scanner.CandidateSelectionReason
 import com.godotdroid.ui.components.CoreManagerSheet
 import com.godotdroid.ui.components.GameCard
 import com.godotdroid.ui.components.GameInspectorSheet
 import com.godotdroid.ui.theme.AccentCyan
 import com.godotdroid.ui.theme.BackgroundDark
+import com.godotdroid.ui.theme.ErrorRed
 import com.godotdroid.ui.theme.GodotBlue
+import com.godotdroid.ui.theme.SuccessGreen
+import com.godotdroid.ui.theme.SuccessGreenBg
 import com.godotdroid.ui.theme.SurfaceCardDark
 import com.godotdroid.ui.theme.SurfaceDark
 import com.godotdroid.ui.theme.SurfaceVariantDark
+import com.godotdroid.ui.theme.WarningAmberBg
 import com.godotdroid.ui.components.ApkExportSheet
 import com.godotdroid.ui.theme.TextPrimaryDark
 import com.godotdroid.ui.theme.TextSecondaryDark
@@ -89,6 +99,10 @@ fun GameLibraryScreen(
     val context = LocalContext.current
     val games by viewModel.games.collectAsState()
     val isImporting by viewModel.isImporting.collectAsState()
+    val isFolderImporting by viewModel.isFolderImporting.collectAsState()
+    val folderImportProgress by viewModel.folderImportProgress.collectAsState()
+    val pendingCandidateChoice by viewModel.pendingCandidateChoice.collectAsState()
+    val pendingImportSummary by viewModel.pendingImportSummary.collectAsState()
     val selectedGame by viewModel.selectedGame.collectAsState()
 
     val installedCores by viewModel.installedCores.collectAsState()
@@ -107,12 +121,18 @@ fun GameLibraryScreen(
     var promptInstallData by remember { mutableStateOf<UiEvent.PromptCoreInstall?>(null) }
     var gameToExport by remember { mutableStateOf<SavedGameItem?>(null) }
 
-    // SAF Multi-File Picker for Games (.exe, .pck, and companion packs)
-    val openDocumentLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenMultipleDocuments()
-    ) { uris ->
-        if (!uris.isNullOrEmpty()) {
-            viewModel.importGames(uris)
+    // SAF Folder Picker (ACTION_OPEN_DOCUMENT_TREE)
+    val openFolderLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+                context.contentResolver.takePersistableUriPermission(uri, takeFlags)
+            } catch (e: Exception) {
+                Log.w("GameLibraryScreen", "takePersistableUriPermission failed: ${e.message}")
+            }
+            viewModel.importGameFolder(uri)
         }
     }
 
@@ -182,7 +202,7 @@ fun GameLibraryScreen(
         floatingActionButton = {
             FloatingActionButton(
                 onClick = {
-                    openDocumentLauncher.launch(arrayOf("*/*"))
+                    openFolderLauncher.launch(null)
                 },
                 containerColor = GodotBlue,
                 contentColor = BackgroundDark,
@@ -251,7 +271,7 @@ fun GameLibraryScreen(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Tap '+' to import a PC Godot game (.exe or .pck).\nGodotDroid inspects the binary, detects the engine version, extracts project configs, and checks Android compatibility.",
+                        text = "Tap '+' to select a Godot game folder.\nGodotDroid scans for main executables and packages, preserves folder structure, detects the engine version, and checks Android compatibility.",
                         color = TextSecondaryDark,
                         fontSize = 13.sp,
                         textAlign = TextAlign.Center,
@@ -485,6 +505,369 @@ fun GameLibraryScreen(
                         textContentColor = TextSecondaryDark
                     )
                 }
+            }
+
+            // 1. Folder Import Progress Dialog
+            if (isFolderImporting) {
+                AlertDialog(
+                    onDismissRequest = { /* Modal during active folder copy */ },
+                    title = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(
+                                color = GodotBlue,
+                                strokeWidth = 3.dp,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text("Copying Game Folder...", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        }
+                    },
+                    text = {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Text(
+                                text = folderImportProgress?.currentFileName ?: "Scanning folder...",
+                                color = TextSecondaryDark,
+                                fontSize = 12.sp,
+                                maxLines = 2
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            LinearProgressIndicator(
+                                progress = { folderImportProgress?.progressFraction ?: 0f },
+                                modifier = Modifier.fillMaxWidth(),
+                                color = GodotBlue,
+                                trackColor = SurfaceVariantDark
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            val copiedMb = (folderImportProgress?.bytesCopied ?: 0L) / (1024.0 * 1024.0)
+                            val totalMb = (folderImportProgress?.totalBytes ?: 0L) / (1024.0 * 1024.0)
+                            Text(
+                                text = "${folderImportProgress?.filesCopied ?: 0} / ${folderImportProgress?.totalFiles ?: 0} files (%.1f / %.1f MB)".format(copiedMb, totalMb),
+                                color = TextTertiaryDark,
+                                fontSize = 11.sp
+                            )
+                        }
+                    },
+                    confirmButton = {},
+                    dismissButton = {
+                        TextButton(onClick = { viewModel.cancelFolderImport() }) {
+                            Text("Cancel", color = ErrorRed, fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    containerColor = SurfaceDark,
+                    titleContentColor = TextPrimaryDark,
+                    textContentColor = TextSecondaryDark
+                )
+            }
+
+            // 2. Candidate Chooser Dialog
+            pendingCandidateChoice?.let { choice ->
+                AlertDialog(
+                    onDismissRequest = { viewModel.dismissCandidateChooser() },
+                    icon = {
+                        Icon(
+                            imageVector = Icons.Default.SportsEsports,
+                            contentDescription = null,
+                            tint = GodotBlue,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    },
+                    title = {
+                        Text("Select Main Game File", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    },
+                    text = {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            Text(
+                                text = "Multiple executable or package candidates were found. Select the main file to run:",
+                                color = TextSecondaryDark,
+                                fontSize = 13.sp
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            choice.candidates.forEach { candidate ->
+                                val reasonLabel = when (candidate.reason) {
+                                    CandidateSelectionReason.EMBEDDED_EXE -> "Embedded PCK (.exe)"
+                                    CandidateSelectionReason.MATCHING_EXE_PCK -> "Matching PCK"
+                                    CandidateSelectionReason.LARGEST_PCK -> "Largest PCK"
+                                }
+                                val sizeMb = candidate.sizeBytes / (1024.0 * 1024.0)
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(SurfaceCardDark)
+                                        .border(1.dp, SurfaceVariantDark, RoundedCornerShape(8.dp))
+                                        .clickable { viewModel.chooseCandidate(candidate) }
+                                        .padding(12.dp)
+                                ) {
+                                    Column {
+                                        Text(
+                                            text = candidate.relativePath,
+                                            color = TextPrimaryDark,
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Text(
+                                                text = reasonLabel,
+                                                color = AccentCyan,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                            Text(
+                                                text = "%.1f MB".format(sizeMb),
+                                                color = TextTertiaryDark,
+                                                fontSize = 11.sp
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    confirmButton = {},
+                    dismissButton = {
+                        TextButton(onClick = { viewModel.dismissCandidateChooser() }) {
+                            Text("Cancel", color = TextSecondaryDark)
+                        }
+                    },
+                    containerColor = SurfaceDark,
+                    titleContentColor = TextPrimaryDark,
+                    textContentColor = TextSecondaryDark
+                )
+            }
+
+            // 3. Import Summary Dialog
+            pendingImportSummary?.let { summary ->
+                AlertDialog(
+                    onDismissRequest = { viewModel.dismissImportSummary() },
+                    icon = {
+                        Icon(
+                            imageVector = Icons.Default.RocketLaunch,
+                            contentDescription = null,
+                            tint = GodotBlue,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    },
+                    title = {
+                        Text("Import Summary", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    },
+                    text = {
+                        val scroll = rememberScrollState()
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .verticalScroll(scroll)
+                        ) {
+                            Text(
+                                text = summary.game.report.gameTitle,
+                                color = TextPrimaryDark,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            // Main File Path
+                            Row(modifier = Modifier.fillMaxWidth()) {
+                                Text("Main File: ", color = TextSecondaryDark, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                                Text(
+                                    text = summary.selectedCandidate.relativePath,
+                                    color = TextPrimaryDark,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            // Engine Version
+                            Row(modifier = Modifier.fillMaxWidth()) {
+                                Text("Engine Version: ", color = TextSecondaryDark, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                                Text(
+                                    text = summary.game.report.pckHeader.engineVersionString,
+                                    color = AccentCyan,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            // Matching Core & Status
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Matching Core: ", color = TextSecondaryDark, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                                Text(
+                                    text = "Godot ${summary.matchingCoreKey} ",
+                                    color = TextPrimaryDark,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(if (summary.isCoreInstalled) SuccessGreenBg else WarningAmberBg)
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text(
+                                        text = if (summary.isCoreInstalled) "Installed" else "Not Installed",
+                                        color = if (summary.isCoreInstalled) SuccessGreen else WarningAmber,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+
+                            // If core is not installed, provide direct download button
+                            if (!summary.isCoreInstalled) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Button(
+                                    onClick = { viewModel.downloadCoreFromSummary(summary.matchingCoreKey) },
+                                    enabled = !isDownloadingCore,
+                                    colors = ButtonDefaults.buttonColors(containerColor = GodotBlue),
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    if (isDownloadingCore) {
+                                        CircularProgressIndicator(
+                                            color = BackgroundDark,
+                                            strokeWidth = 2.dp,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = downloadProgress?.currentStage ?: "Downloading Core...",
+                                            fontSize = 12.sp,
+                                            color = BackgroundDark
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Default.Extension,
+                                            contentDescription = null,
+                                            tint = BackgroundDark,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Download Godot ${summary.matchingCoreKey} Core",
+                                            fontSize = 12.sp,
+                                            color = BackgroundDark,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            // PCK Files List
+                            Text(
+                                text = "PCK Packages (${summary.scanResult.allPckFiles.size}):",
+                                color = TextSecondaryDark,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            summary.scanResult.allPckFiles.forEach { pck ->
+                                val relPck = pck.relativeTo(summary.scanResult.rootDir).path
+                                Text(
+                                    text = "• $relPck (%.1f MB)".format(pck.length() / (1024.0 * 1024.0)),
+                                    color = TextPrimaryDark,
+                                    fontSize = 11.sp,
+                                    modifier = Modifier.padding(start = 6.dp, top = 2.dp)
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            // Total Files & Size
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(
+                                    text = "Total Files: ${summary.scanResult.totalFileCount}",
+                                    color = TextSecondaryDark,
+                                    fontSize = 12.sp
+                                )
+                                Text(
+                                    text = "Total Size: %.1f MB".format(summary.scanResult.totalSizeBytes / (1024.0 * 1024.0)),
+                                    color = TextSecondaryDark,
+                                    fontSize = 12.sp
+                                )
+                            }
+
+                            // Windows DLL Warnings
+                            if (summary.scanResult.dllWarnings.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(WarningAmberBg)
+                                        .border(1.dp, WarningAmber.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                                        .padding(10.dp)
+                                ) {
+                                    Column {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = Icons.Default.Warning,
+                                                contentDescription = null,
+                                                tint = WarningAmber,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = "Windows Dynamic Library Warnings",
+                                                color = WarningAmber,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        summary.scanResult.dllWarnings.forEach { warning ->
+                                            Text(
+                                                text = "• $warning",
+                                                color = WarningAmber,
+                                                fontSize = 11.sp,
+                                                modifier = Modifier.padding(top = 2.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        Row {
+                            TextButton(onClick = { viewModel.dismissImportSummary() }) {
+                                Text("Done", color = TextSecondaryDark)
+                            }
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Button(
+                                onClick = { viewModel.launchFromSummary(context) },
+                                colors = ButtonDefaults.buttonColors(containerColor = GodotBlue),
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PlayArrow,
+                                    contentDescription = null,
+                                    tint = BackgroundDark,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Play", color = BackgroundDark, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    },
+                    containerColor = SurfaceDark,
+                    titleContentColor = TextPrimaryDark,
+                    textContentColor = TextSecondaryDark
+                )
             }
 
             // Export Standalone APK Sheet

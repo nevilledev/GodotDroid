@@ -323,17 +323,18 @@ class GodotRunnerActivity : FragmentActivity() {
                 classLoaderProvider = { engineInstance?.classLoader }
             )
 
-            // 7. Change working directory to runtime staging folder and initialize Godot
+            // 7. Change working directory to main game file's directory (or runtime staging folder) and initialize Godot
+            val workingDir = targetFile.parentFile?.takeIf { it.exists() } ?: environment.runtimeDir
             try {
-                System.setProperty("user.dir", environment.runtimeDir.absolutePath)
+                System.setProperty("user.dir", workingDir.absolutePath)
                 val libcoreClass = Class.forName("libcore.io.Libcore")
                 val osField = libcoreClass.getField("os")
                 val osInstance = osField.get(null)
                 val chdirMethod = osInstance.javaClass.getMethod("chdir", String::class.java)
-                chdirMethod.invoke(osInstance, environment.runtimeDir.absolutePath)
-                Log.i(TAG, "Changed process working directory to: ${environment.runtimeDir.absolutePath}")
+                chdirMethod.invoke(osInstance, workingDir.absolutePath)
+                Log.i(TAG, "Changed process working directory to: ${workingDir.absolutePath}")
             } catch (e: Throwable) {
-                Log.w(TAG, "Could not chdir to ${environment.runtimeDir.absolutePath}: ${e.message}")
+                Log.w(TAG, "Could not chdir to ${workingDir.absolutePath}: ${e.message}")
             }
 
             val result = dynamicLoader.loadAndInitialize(

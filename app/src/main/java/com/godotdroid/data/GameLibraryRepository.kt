@@ -8,6 +8,10 @@ import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Log
 import com.godotdroid.pck.analyzer.GameCompatibilityAnalyzer
+import com.godotdroid.pck.inspector.PckBinaryInspector
+import com.godotdroid.pck.scanner.FolderScanResult
+import com.godotdroid.pck.scanner.GameCandidate
+import com.godotdroid.pck.scanner.GameFolderScanner
 import com.godotdroid.pck.model.RendererType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -18,7 +22,8 @@ import java.util.UUID
 
 class GameLibraryRepository(
     private val context: Context,
-    private val analyzer: GameCompatibilityAnalyzer = GameCompatibilityAnalyzer()
+    private val analyzer: GameCompatibilityAnalyzer = GameCompatibilityAnalyzer(),
+    private val inspector: PckBinaryInspector = PckBinaryInspector()
 ) {
     companion object {
         private const val TAG = "GameLibraryRepository"
@@ -37,6 +42,73 @@ class GameLibraryRepository(
 
     private val gamesDir = File(context.filesDir, "games").apply { mkdirs() }
     private val databaseFile = File(context.filesDir, "game_library.json")
+    private val folderImporter = GameFolderImporter(context)
+    private val folderScanner = GameFolderScanner(inspector, analyzer)
+
+    suspend fun importGameFolder(
+        treeUri: Uri,
+        onProgress: (FolderImportProgress) -> Unit,
+        isCancelled: () -> Boolean
+    ): Result<FolderScanResult> = withContext(Dispatchers.IO) {
+        val id = UUID.randomUUID().toString()
+        val targetDir = File(gamesDir, id)
+        val copyResult = folderImporter.importFolder(treeUri, targetDir, onProgress, isCancelled)
+        copyResult.fold(
+            onSuccess = { copiedDir ->
+                val scanResult = folderScanner.scan(copiedDir)
+                if (scanResult.candidates.isEmpty()) {
+                    copiedDir.deleteRecursively()
+                    Result.failure(IllegalStateException("No Godot game file found in selected folder"))
+                } else {
+                    Result.success(scanResult)
+                }
+            },
+            onFailure = { err ->
+                Result.failure(err)
+            }
+        )
+    }
+
+    suspend fun finalizeFolderImport(
+        scanResult: FolderScanResult,
+        candidate: GameCandidate
+    ): Result<SavedGameItem> = withContext(Dispatchers.IO) {
+        try {
+            val targetFile = candidate.file
+            val gameId = scanResult.rootDir.name
+            val report = folderScanner.analyzeCandidate(candidate)
+            val defaultRenderer = if (report.detectedRenderer != RendererType.UNKNOWN) {
+                report.detectedRenderer
+            } else {
+                RendererType.MOBILE
+            }
+
+            val item = SavedGameItem(
+                id = gameId,
+                filePath = targetFile.absolutePath,
+                originalFileName = targetFile.name,
+                fileSize = targetFile.length(),
+                report = report,
+                selectedRenderer = defaultRenderer,
+                dateAdded = System.currentTimeMillis()
+            )
+
+            val existing = getGames().toMutableList()
+            existing.removeAll { it.id == item.id || it.filePath == item.filePath }
+            existing.add(0, item)
+            saveGames(existing)
+
+            Result.success(item)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun cancelFolderImport(scanResult: FolderScanResult) = withContext(Dispatchers.IO) {
+        try {
+            scanResult.rootDir.deleteRecursively()
+        } catch (_: Exception) {}
+    }
 
     suspend fun getGames(): List<SavedGameItem> = withContext(Dispatchers.IO) {
         if (!databaseFile.exists()) return@withContext emptyList()
