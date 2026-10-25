@@ -17,7 +17,7 @@ class GameLibraryRepositoryTest {
 
     @Test
     fun testResolveParentDirectory_FromDirectFileUri() {
-        val gameFolder = tempFolder.newFolder("SomaticHex")
+        val gameFolder = tempFolder.newFolder("TestGame")
         val mainPack = File(gameFolder, "game.pck").apply { writeText("fake pck") }
         val companionPack = File(gameFolder, "love.pck").apply { writeText("fake love pck") }
         val companionDll = File(gameFolder, "optimizations.dll").apply { writeText("fake dll") }
